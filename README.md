@@ -1,3 +1,5 @@
+<img src="Resources/icon-512.png" alt="" width="120" align="right">
+
 # Vitals
 
 A personal system monitor for the macOS menu bar. Built as a replacement for
@@ -171,6 +173,20 @@ about 42x. Verified against a single-core busy loop: 99.4% with the conversion,
 versioned directory has an executable named after the version, so both name
 fields report e.g. `2.1.218`. When the name starts with a digit the sampler
 falls back to `argv[0]`, which is what `ps` displays.
+
+**The icon is drawn square on purpose.** `Scripts/make-icon.sh` renders it from
+`make-icon.swift` and packs `Resources/Vitals.icns`; the artwork has no rounded
+corners of its own. macOS 26 masks a legacy `.icns` into the system squircle
+itself, so art that draws its own gets composited inside the system container
+and comes out as an icon within an icon on a light plate. Drawing the squircle
+at full canvas size does not fix it either — it is a slightly different curve
+from the system's, and the gap shows as a pale fringe along the edges. A plain
+filled square is the only version the mask lands on cleanly. On macOS 14 and
+15, which do no masking, the icon is a square.
+
+It is also not one drawing scaled down. At 16pt the mark gets about ten usable
+pixels of width, so below 64 the complex collapses to a single spike and the
+bloom is dropped, which would otherwise be grey haze at that size.
 
 ## Launch at login
 

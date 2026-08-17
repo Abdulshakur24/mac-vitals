@@ -27,6 +27,10 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BUILD_DIR/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
 
+# The icon is committed rather than generated here, so a normal build does not
+# pay to redraw it. Run Scripts/make-icon.sh after changing the artwork.
+cp "$ROOT/Resources/$APP_NAME.icns" "$APP/Contents/Resources/$APP_NAME.icns"
+
 # LSUIElement is what keeps this out of the Dock and the app switcher. Without
 # it the app is a normal windowless application with a permanent Dock tile.
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -41,6 +45,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<key>CFBundleIdentifier</key>
 	<string>$BUNDLE_ID</string>
 	<key>CFBundleExecutable</key>
+	<string>$APP_NAME</string>
+	<key>CFBundleIconFile</key>
 	<string>$APP_NAME</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
