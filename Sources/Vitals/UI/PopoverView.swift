@@ -72,11 +72,23 @@ struct PopoverView: View {
             Sparkline(values: snapshot.memoryHistory.values, ceiling: 1, color: pressureColor)
                 .frame(height: 32)
 
-            HStack(spacing: 14) {
-                legend("App", Format.bytes(snapshot.memory.app))
-                legend("Wired", Format.bytes(snapshot.memory.wired))
-                legend("Compressed", Format.bytes(snapshot.memory.compressed))
-                legend("Pressure", Format.percent(snapshot.memory.pressure), tint: pressureColor)
+            // Two rows rather than one, and a grid rather than an HStack, both
+            // for the same reason: five of these side by side overflow 320pt
+            // as soon as a value lands between 100 MB and 1 GB, which is where
+            // App and Swap sit on an idle machine. The split is not only for
+            // the space — the top row is the three parts that sum to Used, and
+            // the bottom row is the two numbers that say whether that is a
+            // problem. Columns stay aligned between the rows.
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
+                GridRow {
+                    legend("App", Format.bytes(snapshot.memory.app))
+                    legend("Wired", Format.bytes(snapshot.memory.wired))
+                    legend("Compressed", Format.bytes(snapshot.memory.compressed))
+                }
+                GridRow {
+                    legend("Swap", Format.bytes(snapshot.memory.swapUsed))
+                    legend("Pressure", Format.percent(snapshot.memory.pressure), tint: pressureColor)
+                }
             }
         }
     }

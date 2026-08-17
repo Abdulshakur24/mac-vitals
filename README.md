@@ -22,7 +22,7 @@ on the network rates — and only then whole metrics, always from the least
 important end. It takes the space back as soon as there is room for it.
 
 **Popover** — click the item for per-core P/E load bars, 60-second sparklines
-for every metric, memory breakdown, disk capacity and throughput, all
+for every metric, memory breakdown with swap used, disk capacity and throughput, all
 temperature sensors, and the top five processes by CPU and by memory.
 
 Right-click for the config file, a launch-at-login toggle, and quit.
@@ -68,6 +68,7 @@ is how each metric was validated against the system's own tools:
 | Metric | Cross-checked against |
 |---|---|
 | CPU, memory | Activity Monitor, `vm_stat` |
+| Swap | `sysctl vm.swapusage` |
 | Network | `netstat -ibn` deltas over the same window |
 | Disk | `ioreg -r -c IOBlockStorageDriver`, `df -h /` |
 | Temperature | response to sustained load |

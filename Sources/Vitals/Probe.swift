@@ -47,6 +47,10 @@ enum Probe {
                        app \(Format.bytes(sample.app))  wired \(Format.bytes(sample.wired))  \
                 compressed \(Format.bytes(sample.compressed))  free \(Format.bytes(sample.free))
                 """)
+                print("""
+                       swap \(Format.bytes(sample.swapUsed)) / \(Format.bytes(sample.swapTotal))  \
+                (\(Format.percent(sample.swapFraction)))
+                """)
             }
 
             if let sample = network.sample() {

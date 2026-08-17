@@ -10,12 +10,15 @@ struct MemorySample: Equatable {
     var inactive: UInt64 = 0
     var compressed: UInt64 = 0
     var free: UInt64 = 0
+    var swapUsed: UInt64 = 0
+    var swapTotal: UInt64 = 0
     /// 1 = normal, 2 = warning, 4 = critical (kernel's own scale).
     var pressureLevel: Int32 = 1
     /// 0...1, the number Activity Monitor draws as its pressure graph.
     var pressure: Double = 0
 
     var usedFraction: Double { total > 0 ? Double(used) / Double(total) : 0 }
+    var swapFraction: Double { swapTotal > 0 ? Double(swapUsed) / Double(swapTotal) : 0 }
 }
 
 /// System-wide memory statistics from the Mach VM subsystem.
@@ -60,6 +63,7 @@ final class MemorySampler {
         let used = app + wired + compressed
 
         let level = pressureLevel()
+        let swap = swapUsage()
 
         return MemorySample(
             total: totalMemory,
@@ -70,11 +74,27 @@ final class MemorySampler {
             inactive: inactive,
             compressed: compressed,
             free: free,
+            swapUsed: swap.used,
+            swapTotal: swap.total,
             pressureLevel: level,
             // Wired and compressed pages are the ones that can't be evicted
             // cheaply, so their share of total is the honest pressure signal.
             pressure: totalMemory > 0 ? Double(wired + compressed) / Double(totalMemory) : 0
         )
+    }
+
+    /// Size of the swap files on disk, and how much of them holds live pages.
+    ///
+    /// `swapTotal` is not a ceiling the way `total` is for physical memory —
+    /// macOS grows and shrinks the swap files on demand, so the total is
+    /// itself a measurement, and a machine that is swapping hard reports both
+    /// numbers climbing together. Used alone is the signal; the pair is the
+    /// context for it.
+    private func swapUsage() -> (used: UInt64, total: UInt64) {
+        var usage = xsw_usage()
+        var size = MemoryLayout<xsw_usage>.size
+        guard sysctlbyname("vm.swapusage", &usage, &size, nil, 0) == 0 else { return (0, 0) }
+        return (usage.xsu_used, usage.xsu_total)
     }
 
     private func pressureLevel() -> Int32 {
