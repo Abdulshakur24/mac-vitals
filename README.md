@@ -22,21 +22,39 @@ on the network rates — and only then whole metrics, always from the least
 important end. It takes the space back as soon as there is room for it.
 
 **Popover** — click the item for per-core P/E load bars, 60-second sparklines
-for every metric, memory breakdown with swap used, disk capacity and throughput, all
-temperature sensors, and the top five processes by CPU and by memory.
+for every metric, memory breakdown with swap used, disk capacity and
+throughput, all temperature sensors, and the top five processes by CPU and by
+memory.
 
 Right-click for the config file, a launch-at-login toggle, and quit.
 
 ## Build and install
 
+Needs an Apple Silicon Mac on macOS 14 or later and the Swift toolchain that
+comes with Xcode. Nothing else — no package manager, no dependencies, and the
+build resolves nothing from the network.
+
 ```sh
+git clone https://github.com/Abdulshakur24/mac-vitals.git
+cd mac-vitals
 ./Scripts/build.sh              # build, bundle, sign, install to /Applications, launch
-./Scripts/build.sh --no-install # build the .app only
+./Scripts/build.sh --no-install # build the .app only, leaving /Applications alone
 ```
 
-Requires the Swift toolchain from Xcode. The bundle is signed ad-hoc, which is
-all a locally built app needs — it never crosses a quarantine boundary, so
-Gatekeeper is not involved.
+To look at the numbers without installing anything, build with SwiftPM and run
+the probe described below:
+
+```sh
+swift build && ./.build/debug/Vitals --probe
+```
+
+The bundle is signed ad-hoc, which is all a locally built app needs — it never
+crosses a quarantine boundary, so Gatekeeper is not involved. Uninstalling is
+`rm -rf /Applications/Vitals.app` plus `~/.config/vitals` if you want the
+config gone too.
+
+The app has no Dock tile and no window; once it launches, it is the status item
+in the menu bar.
 
 ## Configuration
 
