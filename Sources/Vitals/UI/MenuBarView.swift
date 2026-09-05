@@ -44,11 +44,12 @@ struct MenuBarView: View {
                 // number that is right beside it, so losing it costs history
                 // rather than the reading itself.
                 if style == .full {
-                    Sparkline(values: engine.snapshot.cpuHistory.values, ceiling: 1)
+                    HistoryChart(points: engine.snapshot.cpuHistory.points(endingAt: engine.snapshot.sampledAt, duration: 60),
+                                 end: engine.snapshot.sampledAt, duration: 60, ceiling: 1, color: .secondary)
                         .frame(width: 22, height: 13)
                 }
                 Text(Format.percent(engine.snapshot.cpu.total))
-                    .foregroundStyle(engine.snapshot.cpu.total >= 0.7 ? .orange : .primary)
+                    .foregroundStyle(engine.snapshot.cpu.total >= engine.thresholds.cpu ? .orange : .primary)
             }
 
         case .memory:
@@ -72,12 +73,12 @@ struct MenuBarView: View {
 
         case .disk:
             Text(Format.percent(engine.snapshot.disk.freeFraction))
-                .foregroundStyle(engine.snapshot.disk.freeFraction < 0.1 ? .orange : .primary)
+                .foregroundStyle(engine.snapshot.disk.freeFraction < engine.thresholds.diskFree ? .orange : .primary)
 
         case .temperature:
             if let temperature = engine.snapshot.thermal.cpu {
                 Text(Format.celsius(temperature))
-                    .foregroundStyle(temperature >= 90 ? .orange : .primary)
+                    .foregroundStyle(temperature >= engine.thresholds.temperature ? .orange : .primary)
             } else {
                 // Sensors unavailable: show nothing rather than a fake zero.
                 Text("")

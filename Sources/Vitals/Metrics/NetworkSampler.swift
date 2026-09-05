@@ -15,14 +15,9 @@ struct NetworkSample: Equatable {
 ///
 /// Two things here are less obvious than they look.
 ///
-/// **The counters are effectively 32-bit.** `if_msghdr2` declares `ifi_ibytes`
-/// as `u_int64_t`, but on this machine the value it carries is the true
-/// counter truncated to 32 bits — verified by comparing against `netstat -ib`,
-/// which reports a figure exceeding 2^32 while this API returns exactly that
-/// figure mod 2^32, with no 64-bit copy anywhere in the message payload. So
-/// every counter is read back as wrapping at 4 GB, and deltas are corrected
-/// for that wrap. At gigabit speeds a wrap happens every ~35 seconds, so
-/// ignoring it would visibly undercount throughput.
+/// Some machines expose wrapping 32-bit counters through 64-bit fields.
+/// Wrap recovery is deliberately conservative; an uncertain reading is dropped
+/// rather than presented as a multi-gigabyte transfer.
 ///
 /// **Totals are session-scoped.** Since-boot totals cannot be recovered from a
 /// wrapped counter, and they are not especially interesting anyway. Summing
@@ -33,9 +28,12 @@ struct NetworkSample: Equatable {
 /// coming up or Wi-Fi reconnecting doesn't register as a huge phantom
 /// transfer — a newly appeared interface simply has no baseline to diff yet.
 final class NetworkSampler {
-    private struct Counters {
+    struct Counters {
         var received: UInt64
         var sent: UInt64
+        var index: UInt16 = 0
+        var changedAt: Int64 = 0
+        var baudrate: UInt64 = 0
     }
 
     private var previous: [String: Counters] = [:]
@@ -43,62 +41,70 @@ final class NetworkSampler {
     private var sessionReceived: UInt64 = 0
     private var sessionSent: UInt64 = 0
 
-    /// Widest plausible transfer in one sample interval. Anything above this
-    /// is a counter reset or an interface being renumbered, not real traffic.
-    private let implausibleDelta: UInt64 = 8 << 30 // 8 GB
-
-    func sample() -> NetworkSample? {
-        guard let current = readInterfaces() else { return nil }
-
-        let now = ProcessInfo.processInfo.systemUptime
-        let elapsed = now - previousTime
-        let hasBaseline = previousTime > 0 && elapsed > 0
-
-        var deltaReceived: UInt64 = 0
-        var deltaSent: UInt64 = 0
-
-        for (name, counters) in current.byInterface {
-            defer { previous[name] = counters }
-            guard hasBaseline, let old = previous[name] else { continue }
-            deltaReceived += wrapCorrectedDelta(new: counters.received, old: old.received)
-            deltaSent += wrapCorrectedDelta(new: counters.sent, old: old.sent)
-        }
-
-        // Drop interfaces that have gone away so their stale baselines don't
-        // linger and produce a bogus delta if the name is ever reused.
-        previous = previous.filter { current.byInterface.keys.contains($0.key) }
-        previousTime = now
-
-        guard hasBaseline else { return nil }
-
-        sessionReceived += deltaReceived
-        sessionSent += deltaSent
-
-        return NetworkSample(
-            download: Double(deltaReceived) / elapsed,
-            upload: Double(deltaSent) / elapsed,
-            sessionReceived: sessionReceived,
-            sessionSent: sessionSent,
-            interface: current.primary,
-            ipAddress: current.primary.isEmpty ? nil : ipAddress(for: current.primary)
-        )
+    func resetBaseline() {
+        previous.removeAll()
+        previousTime = 0
     }
 
-    /// Difference between two readings of a counter that wraps at 2^32.
-    private func wrapCorrectedDelta(new: UInt64, old: UInt64) -> UInt64 {
-        let delta: UInt64
-        if new >= old {
-            delta = new - old
-        } else {
-            // Went backwards: assume one 32-bit wrap rather than a reset.
-            delta = (UInt64(UInt32.max) + 1 - old) + new
+    func sample() -> NetworkSample? {
+        guard let current = readInterfaces() else { resetBaseline(); return nil }
+        var sample = consume(current.byInterface, at: ProcessInfo.processInfo.systemUptime)
+        if !sample.interface.isEmpty { sample.ipAddress = ipAddress(for: sample.interface) }
+        return sample
+    }
+
+    /// Exposed internally so counter resets and interface replacement can be
+    /// regression-tested without changing the machine's network connection.
+    func consume(_ current: [String: Counters], at now: TimeInterval) -> NetworkSample {
+        let elapsed = now - previousTime
+        let hasBaseline = previousTime > 0 && elapsed > 0
+        var received: UInt64 = 0
+        var sent: UInt64 = 0
+        var busiest = ""
+        var bestDelta: UInt64 = 0
+        for name in current.keys.sorted() {
+            guard let counters = current[name] else { continue }
+            if busiest.isEmpty { busiest = name }
+            guard hasBaseline, let old = previous[name],
+                  old.index == counters.index, old.changedAt == counters.changedAt else { continue }
+            let down = Self.counterDelta(new: counters.received, old: old.received,
+                                         elapsed: elapsed, baudrate: counters.baudrate)
+            let up = Self.counterDelta(new: counters.sent, old: old.sent,
+                                       elapsed: elapsed, baudrate: counters.baudrate)
+            received &+= down
+            sent &+= up
+            if down &+ up > bestDelta {
+                busiest = name
+                bestDelta = down &+ up
+            }
         }
-        return delta < implausibleDelta ? delta : 0
+        previous = current // includes the empty/disconnected state
+        previousTime = now
+        sessionReceived &+= received
+        sessionSent &+= sent
+        return NetworkSample(download: hasBaseline ? Double(received) / elapsed : 0,
+                             upload: hasBaseline ? Double(sent) / elapsed : 0,
+                             sessionReceived: sessionReceived, sessionSent: sessionSent,
+                             interface: busiest)
+    }
+
+    /// A backward counter is ambiguous. Accept a single 32-bit wrap only when
+    /// it crosses near the boundary within a conservative link-rate budget.
+    /// Unknown link speeds and long intervals are rebaselined instead. A reset
+    /// at the boundary with unchanged identity cannot be distinguished by this API.
+    static func counterDelta(new: UInt64, old: UInt64, elapsed: TimeInterval, baudrate: UInt64) -> UInt64 {
+        guard elapsed.isFinite, elapsed > 0 else { return 0 }
+        let modulus = UInt64(UInt32.max) + 1
+        if new >= old { return new - old }
+        guard old < modulus, new < modulus, baudrate > 0 else { return 0 }
+        let budget = Double(baudrate) / 8 * elapsed * 1.25
+        guard budget < Double(modulus) / 8 else { return 0 }
+        let delta = modulus - old + new
+        return Double(delta) <= budget ? delta : 0
     }
 
     private struct Interfaces {
         var byInterface: [String: Counters] = [:]
-        var primary = ""
     }
 
     private func readInterfaces() -> Interfaces? {
@@ -111,25 +117,30 @@ final class NetworkSampler {
             sysctl(&mib, u_int(mib.count), raw.baseAddress, &size, nil, 0)
         }) == 0 else { return nil }
 
-        var result = Interfaces()
-        var bestScore: UInt64 = 0
+        if size < buffer.count { buffer.removeSubrange(size...) }
+        return Interfaces(byInterface: Self.interfaceCounters(in: buffer))
+    }
 
+    static func interfaceCounters(in buffer: [UInt8]) -> [String: Counters] {
+        let size = buffer.count
+        var result: [String: Counters] = [:]
         buffer.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
             var offset = 0
 
-            while offset + MemoryLayout<if_msghdr>.stride <= size {
-                let header = base.advanced(by: offset)
-                    .assumingMemoryBound(to: if_msghdr.self).pointee
-                let messageLength = Int(header.ifm_msglen)
-                guard messageLength > 0 else { break }
+            // Route records share only a four-byte prefix. Address records
+            // between interface records are shorter than if_msghdr.
+            while offset + 4 <= size {
+                let messageLength = Int(base.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
+                let messageType = base.load(fromByteOffset: offset + 3, as: UInt8.self)
+                guard messageLength >= 4, offset + messageLength <= size else { break }
                 defer { offset += messageLength }
 
-                guard header.ifm_type == RTM_IFINFO2,
-                      offset + MemoryLayout<if_msghdr2>.stride <= size else { continue }
+                guard messageType == RTM_IFINFO2,
+                      MemoryLayout<if_msghdr2>.stride <= messageLength else { continue }
 
                 let message = base.advanced(by: offset)
-                    .assumingMemoryBound(to: if_msghdr2.self).pointee
+                    .loadUnaligned(as: if_msghdr2.self)
 
                 let flags = message.ifm_flags
                 // Loopback traffic is not network traffic; counting it makes a
@@ -137,44 +148,40 @@ final class NetworkSampler {
                 guard flags & IFF_LOOPBACK == 0 else { continue }
                 guard flags & IFF_UP != 0, flags & IFF_RUNNING != 0 else { continue }
 
-                let name = Self.interfaceName(base: base, offset: offset, limit: size)
+                let name = Self.interfaceName(base: base, offset: offset, limit: offset + messageLength)
                 guard !name.isEmpty else { continue }
 
                 let data = message.ifm_data
-                result.byInterface[name] = Counters(
+                result[name] = Counters(
                     received: data.ifi_ibytes,
-                    sent: data.ifi_obytes
+                    sent: data.ifi_obytes,
+                    index: message.ifm_index,
+                    changedAt: Int64(data.ifi_lastchange.tv_sec) * 1_000_000 + Int64(data.ifi_lastchange.tv_usec),
+                    baudrate: data.ifi_baudrate
                 )
-
-                // Show whichever interface has moved the most, so an active
-                // Ethernet dock or VPN wins over idle Wi-Fi.
-                let score = data.ifi_ibytes &+ data.ifi_obytes
-                if score >= bestScore {
-                    bestScore = score
-                    result.primary = name
-                }
             }
         }
 
-        return result.byInterface.isEmpty ? nil : result
+        return result
     }
 
     /// The interface name lives in the `sockaddr_dl` that immediately follows
     /// the message header, not in the header itself.
-    private static func interfaceName(base: UnsafeRawPointer, offset: Int, limit: Int) -> String {
+    static func interfaceName(base: UnsafeRawPointer, offset: Int, limit: Int) -> String {
         let addressOffset = offset + MemoryLayout<if_msghdr2>.stride
-        guard addressOffset + MemoryLayout<sockaddr_dl>.stride <= limit else { return "" }
-
+        // sockaddr_dl is variable-length on the wire. A short name need not
+        // occupy the full sizeof(sockaddr_dl); only read the fixed 8-byte
+        // prefix followed by the declared name bytes, within this message.
+        let prefixSize = 8
+        guard addressOffset + prefixSize <= limit else { return "" }
         let link = base.advanced(by: addressOffset)
-            .assumingMemoryBound(to: sockaddr_dl.self)
-        let length = Int(link.pointee.sdl_nlen)
-        guard length > 0, length <= 16 else { return "" }
-
-        return withUnsafePointer(to: link.pointee.sdl_data) { pointer in
-            pointer.withMemoryRebound(to: UInt8.self, capacity: length) {
-                String(decoding: UnsafeBufferPointer(start: $0, count: length), as: UTF8.self)
-            }
-        }
+        let addressLength = Int(link.load(as: UInt8.self))
+        let nameLength = Int(link.load(fromByteOffset: 5, as: UInt8.self))
+        guard nameLength > 0, nameLength <= 16,
+              prefixSize + nameLength <= addressLength,
+              addressOffset + addressLength <= limit else { return "" }
+        let bytes = link.advanced(by: prefixSize).assumingMemoryBound(to: UInt8.self)
+        return String(decoding: UnsafeBufferPointer(start: bytes, count: nameLength), as: UTF8.self)
     }
 
     private func ipAddress(for interface: String) -> String? {

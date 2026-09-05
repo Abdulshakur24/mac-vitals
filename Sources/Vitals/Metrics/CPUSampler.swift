@@ -46,6 +46,8 @@ final class CPUSampler {
         return Int(value)
     }
 
+    func resetBaseline() { previous = [] }
+
     func sample() -> CPUSample? {
         var cpuCount: natural_t = 0
         var info: processor_info_array_t?

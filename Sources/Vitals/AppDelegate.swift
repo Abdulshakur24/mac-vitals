@@ -63,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        engine.setInterval(configStore.config.sampleInterval)
+        engine.configure(configStore.config)
 
         setUpStatusItem()
         setUpPopover()
@@ -86,7 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func apply(_ config: Config) {
-        engine.setInterval(config.sampleInterval)
+        engine.configure(config)
         setMetrics(config.menuBar)
     }
 

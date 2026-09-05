@@ -4,9 +4,8 @@ import Foundation
 
 /// Everything the UI draws, in one value type.
 ///
-/// `Equatable` so SwiftUI can skip redraws when nothing material changed —
-/// which is most ticks, since CPU rounds to the same integer percent for
-/// seconds at a time.
+/// Values and timestamped history are published together on the existing tick;
+/// the popover observes a consistent sample without a separate chart timer.
 struct Snapshot: Equatable {
     var cpu = CPUSample()
     var memory = MemorySample()
@@ -15,12 +14,15 @@ struct Snapshot: Equatable {
     var thermal = ThermalSample()
     var processes = ProcessSample()
 
-    var cpuHistory = RingBuffer(capacity: 60)
-    var memoryHistory = RingBuffer(capacity: 60)
-    var downloadHistory = RingBuffer(capacity: 60)
-    var uploadHistory = RingBuffer(capacity: 60)
-    var diskReadHistory = RingBuffer(capacity: 60)
-    var diskWriteHistory = RingBuffer(capacity: 60)
+    var cpuHistory = MetricHistory()
+    var memoryHistory = MetricHistory()
+    var downloadHistory = MetricHistory()
+    var uploadHistory = MetricHistory()
+    var diskReadHistory = MetricHistory()
+    var diskWriteHistory = MetricHistory()
+    var sampledAt: TimeInterval = 0
+    var attention: [AttentionEvent] = []
+
 }
 
 /// Owns the one timer in the app and fans it out to the samplers.
@@ -34,6 +36,22 @@ struct Snapshot: Equatable {
 ///     is actually on screen
 final class MetricsEngine: ObservableObject {
     @Published private(set) var snapshot = Snapshot()
+    @Published private(set) var thresholds = Config.Thresholds()
+    private var attentionTracker = AttentionTracker()
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+
+    func configure(_ config: Config) {
+        let validated = config.validated()
+        let thresholdsChanged = thresholds != validated.thresholds
+        let intervalChanged = configuredInterval != validated.sampleInterval
+        if thresholdsChanged {
+            thresholds = validated.thresholds
+            attentionTracker.interrupt(at: Date().timeIntervalSince1970)
+        }
+        setInterval(validated.sampleInterval)
+        // setInterval already samples when it rebuilds a running timer.
+        if thresholdsChanged, !intervalChanged, timer != nil { tick() }
+    }
 
     private let cpuSampler = CPUSampler()
     private let memorySampler = MemorySampler()
@@ -105,14 +123,15 @@ final class MetricsEngine: ObservableObject {
     var performanceCoreCount: Int { cpuSampler.performanceCoreCount }
     var efficiencyCoreCount: Int { cpuSampler.efficiencyCoreCount }
 
-    init(interval: TimeInterval = 1.0) {
+    init(interval: TimeInterval = 1.0, initialSnapshot: Snapshot = Snapshot()) {
+        self.snapshot = initialSnapshot
         self.configuredInterval = interval
         observePowerNotifications()
     }
 
     deinit {
         timer?.invalidate()
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        for (center, token) in observers { center.removeObserver(token) }
     }
 
     // MARK: - Lifecycle
@@ -155,6 +174,13 @@ final class MetricsEngine: ObservableObject {
 
     private func suspend() {
         isSuspended = true
+        snapshot.cpuHistory.markGap()
+        snapshot.memoryHistory.markGap()
+        snapshot.downloadHistory.markGap()
+        snapshot.uploadHistory.markGap()
+        snapshot.diskReadHistory.markGap()
+        snapshot.diskWriteHistory.markGap()
+        attentionTracker.interrupt(at: Date().timeIntervalSince1970)
         timer?.invalidate()
         timer = nil
     }
@@ -162,25 +188,33 @@ final class MetricsEngine: ObservableObject {
     private func resume() {
         guard isSuspended else { return }
         isSuspended = false
+        cpuSampler.resetBaseline()
+        networkSampler.resetBaseline()
+        diskSampler.resetBaseline()
+        lastThermalSample = 0
         start()
     }
 
     private func observePowerNotifications() {
         // Low Power Mode toggling is posted by ProcessInfo, not NSWorkspace.
-        NotificationCenter.default.addObserver(
+        let powerToken = NotificationCenter.default.addObserver(
             forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
         ) { [weak self] _ in self?.powerStateChanged() }
 
+        observers.append((NotificationCenter.default, powerToken))
+
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification] {
-            center.addObserver(
+            let token = center.addObserver(
                 forName: name, object: nil, queue: .main
             ) { [weak self] _ in self?.suspend() }
+            observers.append((center, token))
         }
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
-            center.addObserver(
+            let token = center.addObserver(
                 forName: name, object: nil, queue: .main
             ) { [weak self] _ in self?.resume() }
+            observers.append((center, token))
         }
     }
 
@@ -188,27 +222,38 @@ final class MetricsEngine: ObservableObject {
 
     private func tick() {
         var next = snapshot
+        let timestamp = Date().timeIntervalSince1970
+        if snapshot.sampledAt > 0, timestamp - snapshot.sampledAt > effectiveInterval * 2 + 5 || timestamp < snapshot.sampledAt {
+            attentionTracker.interrupt(at: snapshot.sampledAt)
+        }
+        next.sampledAt = timestamp
 
-        if let cpu = cpuSampler.sample() {
+        let cpuSample = cpuSampler.sample()
+        if let cpu = cpuSample {
             next.cpu = cpu
-            next.cpuHistory.append(cpu.total)
+            next.cpuHistory.append(cpu.total, at: timestamp, interval: effectiveInterval)
         }
 
-        if let memory = memorySampler.sample() {
+        let memorySample = memorySampler.sample()
+        if let memory = memorySample {
             next.memory = memory
-            next.memoryHistory.append(memory.pressure)
+            next.memoryHistory.append(memory.usedFraction, at: timestamp, interval: effectiveInterval)
         }
 
         if let network = networkSampler.sample() {
             next.network = network
-            next.downloadHistory.append(network.download)
-            next.uploadHistory.append(network.upload)
+            next.downloadHistory.append(network.download, at: timestamp, interval: effectiveInterval)
+            next.uploadHistory.append(network.upload, at: timestamp, interval: effectiveInterval)
+        } else {
+            next.downloadHistory.markGap()
+            next.uploadHistory.markGap()
         }
 
-        if let disk = diskSampler.sample() {
+        let diskSample = diskSampler.sample()
+        if let disk = diskSample {
             next.disk = disk
-            next.diskReadHistory.append(disk.read)
-            next.diskWriteHistory.append(disk.write)
+            next.diskReadHistory.append(disk.read, at: timestamp, interval: effectiveInterval)
+            next.diskWriteHistory.append(disk.write, at: timestamp, interval: effectiveInterval)
         }
 
         let now = ProcessInfo.processInfo.systemUptime
@@ -218,15 +263,27 @@ final class MetricsEngine: ObservableObject {
             lastThermalSample = now
         }
 
+        // Public thermal state remains available without temperature sensors.
+        next.thermal.state = ProcessInfo.processInfo.thermalState
+        // A failed sample must not sustain a warning using an old reading.
+        var evidence = next
+        if cpuSample == nil { evidence.cpu = CPUSample(); next.cpuHistory.markGap() }
+        if memorySample == nil { evidence.memory = MemorySample(); next.memoryHistory.markGap() }
+        if diskSample == nil {
+            evidence.disk = DiskSample()
+            next.diskReadHistory.markGap()
+            next.diskWriteHistory.markGap()
+        }
+        attentionTracker.update(snapshot: evidence, thresholds: thresholds, at: timestamp)
+        next.attention = attentionTracker.events
+
         // Walking the process table is the most expensive thing here, so it
         // happens only while someone is actually reading the result.
         if isDetailVisible(), let processes = processSampler.sample() {
             next.processes = processes
         }
 
-        // Assigning an unchanged value still fires objectWillChange, so guard
-        // it: an idle machine produces identical snapshots for many ticks in
-        // a row and there is no reason to re-render for those.
+        // Publish the readings, history timestamp, and attention state together.
         if next != snapshot {
             snapshot = next
         }

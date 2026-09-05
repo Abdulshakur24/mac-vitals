@@ -33,7 +33,10 @@ struct Config: Codable, Equatable {
     /// metric list would leave an invisible status item with no way back.
     func validated() -> Config {
         var result = self
-        result.sampleInterval = min(max(sampleInterval, 0.5), 60)
+        result.sampleInterval = sampleInterval.isFinite ? min(max(sampleInterval, 0.5), 60) : 1
+        result.thresholds.cpu = thresholds.cpu.isFinite ? min(max(thresholds.cpu, 0), 1) : 0.7
+        result.thresholds.diskFree = thresholds.diskFree.isFinite ? min(max(thresholds.diskFree, 0), 1) : 0.1
+        result.thresholds.temperature = thresholds.temperature.isFinite ? min(max(thresholds.temperature, 1), 130) : 90
         // A metric listed twice would be drawn twice, and the two copies would
         // be indistinguishable to the readout's layout, which identifies blocks
         // by their metric.

@@ -9,6 +9,7 @@ let package = Package(
             name: "Vitals",
             path: "Sources/Vitals",
             swiftSettings: [.swiftLanguageMode(.v5)]
-        )
+        ),
+        .testTarget(name: "VitalsTests", dependencies: ["Vitals"])
     ]
 )

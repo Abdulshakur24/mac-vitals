@@ -41,7 +41,7 @@ enum Probe {
             if let sample = memory.sample() {
                 print("""
                 mem    used \(Format.bytes(sample.used)) / \(Format.bytes(sample.total))  \
-                pressure \(Format.percent(sample.pressure)) (level \(sample.pressureLevel))
+                pressure \(sample.pressureLabel) (level \(sample.pressureLevel))
                 """)
                 print("""
                        app \(Format.bytes(sample.app))  wired \(Format.bytes(sample.wired))  \

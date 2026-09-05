@@ -8,7 +8,7 @@ struct DiskSample: Equatable {
     var total: UInt64 = 0
 
     var usedFraction: Double {
-        total > 0 ? Double(total - free) / Double(total) : 0
+        total > 0 ? Double(total > free ? total - free : 0) / Double(total) : 0
     }
     var freeFraction: Double {
         total > 0 ? Double(free) / Double(total) : 0
@@ -29,6 +29,8 @@ final class DiskSampler {
     private var cachedTotal: UInt64 = 0
     private var lastCapacityCheck: TimeInterval = 0
     private let capacityInterval: TimeInterval = 60
+
+    func resetBaseline() { previousTime = 0 }
 
     func sample() -> DiskSample? {
         let now = ProcessInfo.processInfo.systemUptime

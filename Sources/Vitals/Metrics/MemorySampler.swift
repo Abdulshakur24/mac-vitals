@@ -14,8 +14,18 @@ struct MemorySample: Equatable {
     var swapTotal: UInt64 = 0
     /// 1 = normal, 2 = warning, 4 = critical (kernel's own scale).
     var pressureLevel: Int32 = 1
-    /// 0...1, the number Activity Monitor draws as its pressure graph.
-    var pressure: Double = 0
+    /// Share of physical RAM occupied by wired and compressed pages.
+    /// This is not the system memory pressure measurement.
+    var wiredAndCompressedFraction: Double = 0
+
+    var pressureLabel: String {
+        switch pressureLevel {
+        case 4...: "Critical"
+        case 2...: "Elevated"
+        case 1: "Normal"
+        default: "Unavailable"
+        }
+    }
 
     var usedFraction: Double { total > 0 ? Double(used) / Double(total) : 0 }
     var swapFraction: Double { swapTotal > 0 ? Double(swapUsed) / Double(swapTotal) : 0 }
@@ -77,9 +87,8 @@ final class MemorySampler {
             swapUsed: swap.used,
             swapTotal: swap.total,
             pressureLevel: level,
-            // Wired and compressed pages are the ones that can't be evicted
-            // cheaply, so their share of total is the honest pressure signal.
-            pressure: totalMemory > 0 ? Double(wired + compressed) / Double(totalMemory) : 0
+            // Explicit component ratio, separate from the kernel pressure level.
+            wiredAndCompressedFraction: totalMemory > 0 ? Double(wired + compressed) / Double(totalMemory) : 0
         )
     }
 
@@ -101,7 +110,7 @@ final class MemorySampler {
         var value: Int32 = 1
         var size = MemoryLayout<Int32>.size
         guard sysctlbyname("kern.memorystatus_vm_pressure_level", &value, &size, nil, 0) == 0 else {
-            return 1
+            return 0
         }
         return value
     }

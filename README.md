@@ -23,10 +23,28 @@ fits. Ornament goes first — the CPU sparkline, the decimal on memory, the unit
 on the network rates — and only then whole metrics, always from the least
 important end. It takes the space back as soon as there is room for it.
 
-**Popover** — click the item for per-core P/E load bars, 60-second sparklines
-for every metric, memory breakdown with swap used, disk capacity and
-throughput, all temperature sensors, and the top five processes by CPU and by
-memory.
+**Popover** — click the item for a compact attention summary, per-core P/E load
+bars, five-minute or one-hour history, memory breakdown with the system pressure
+status and swap used, disk capacity and throughput, temperature summaries, and
+the top five processes by CPU and by memory. An Activity Monitor shortcut opens
+the system app for further investigation. The panel scrolls on smaller displays.
+
+History uses timestamped five-second peak buckets, bounded to roughly one hour
+per metric. The same real-time axis is used at every sampling rate, including
+Low Power Mode. Gaps break the lines after sleep or missing samples. The menu-bar
+CPU graph covers the last minute. Memory history shows **used RAM / physical
+RAM**, not an approximation of Activity Monitor's memory pressure graph. Upload
+and download share one scale, with its maximum printed below the chart.
+
+**Needs attention** reports low disk space immediately, elevated memory pressure
+after ten seconds, and high overall CPU after fifteen seconds. Critical memory
+pressure and serious/critical macOS thermal states appear immediately. CPU and
+disk conditions use the configured thresholds; temperature's configured limit
+colors the menu-bar temperature. Thermal state is checked independently of the
+private temperature sensors. Sleep interrupts pending warnings. Recent events
+are retained for the session, limited to twenty events and one hour after an
+event ends. History and events stay in memory; nothing is uploaded or written
+to disk, and there are no notification permissions or additional timers.
 
 Right-click for the config file, a launch-at-login toggle, and quit.
 
@@ -72,9 +90,12 @@ change immediately; there is no restart and no settings UI.
 ```
 
 `menuBar` accepts `cpu`, `memory`, `network`, `disk`, and `temperature`.
-Reordering the array reorders the readout; removing an entry hides it and stops
-that sampler. Values are bounded on load, so a typo degrades to the default
-rather than producing a broken or battery-hungry app.
+Reordering the array reorders the readout; removing an entry hides it.
+Temperature sampling also stops when it is hidden and the popover is closed;
+CPU, memory, network, and disk continue to support history and attention.
+Sampling intervals and thresholds are bounded on load. Malformed JSON keeps
+the last valid configuration (or the default at startup). Threshold changes
+apply to both the menu bar and popover immediately.
 
 The order is also the order of importance. On a crowded menu bar the readout is
 cut back from the end of the list, so the first entry is both the leftmost and
@@ -157,11 +178,19 @@ With the last of these the readout walks the whole ladder down and stops at the
 bottom rung rather than churning: `146 → 140 → 114 → 111 → 100 → 74 → 66 → 40`,
 one refusal recorded per rung.
 
-**Network counters are effectively 32-bit.** `if_msghdr2` declares `ifi_ibytes`
-as `u_int64_t`, but the value it carries is truncated to 32 bits and wraps every
-4 GB. Deltas are corrected for the wrap, and totals are accumulated since launch
-rather than read from the counter, since a since-boot total cannot be recovered
-from a wrapped value.
+**Network counters can wrap or reset.** Some machines return a 32-bit value
+through `if_msghdr2`'s 64-bit fields. Deltas are tracked per interface identity
+(index and last-change timestamp), with fresh baselines after wake, disconnect,
+or replacement. A backwards value is accepted as a single wrap only near the
+32-bit boundary and within a conservative link-rate budget. Unknown speeds and
+ambiguous long intervals are rebaselined instead, so totals can undercount those
+intervals. A reset near the wrap boundary with unchanged identity is inherently
+indistinguishable from a wrap with this API. Native 64-bit forward counters work
+without truncation. Session totals cover observed transfers since launch.
+
+Rates sum all active, non-loopback interfaces, which may count VPN traffic at
+both the tunnel and physical interface. The displayed interface is the one with
+the largest **current delta**, not the largest lifetime byte counter.
 
 **Process CPU times are not nanoseconds.** `ri_user_time` and `ri_system_time`
 are documented as nanoseconds but are actually mach absolute time units. On this
@@ -206,7 +235,8 @@ which needs no signature or approval.
 ## Keeping it cheap
 
 The whole point was to not be another monitor that costs more battery than it
-saves. Measured idle, untouched for five minutes:
+saves. The original version measured idle, untouched for five minutes (these figures
+are a baseline, not a measurement of the history/attention update):
 
 **0.59% of one core** — 0.06% of this 10-core machine — with resident memory
 flat at ~48 MB over repeated runs.
@@ -229,11 +259,28 @@ irreducible: reading them means one IOKit event copy per sensor.
 - Sampling stops on sleep and on display sleep, and resumes on wake.
 - Top processes are only sampled while the popover is open. Temperature, which
   walks 40+ HID services, runs at a fifth of the base rate.
-- Snapshots are `Equatable` and views only redraw on material change, so an
-  idle machine produces no rendering work.
+- Snapshots are `Equatable`; timestamped history advances on the existing tick.
+  History storage and recent event counts are bounded.
 - Fixed per-metric widths and monospaced digits, so the status item resizes
   only when it changes shape to fit the space, never because a number gained a
   digit, and so it never drags the rest of the menu bar sideways on a tick.
 - Fitting the readout to the space costs a window frame read and a walk of a
   couple of dozen precomputed widths, on the sample that is already happening.
   It does not get a timer of its own.
+
+## Regression checks
+
+```sh
+swift test
+swift run Vitals --probe
+./Scripts/build.sh --no-install
+```
+
+Tests cover threshold validation, timestamped retention and peak aggregation,
+sleep gaps, network wraps/resets/reconnections, and sustained attention events.
+For optional offscreen light/dark popover renders without changing the installed
+application:
+
+```sh
+VITALS_RENDER_DIR="$PWD/.build/previews" swift test --filter PreviewTests
+```
