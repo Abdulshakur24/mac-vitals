@@ -23,10 +23,21 @@ struct ProcessSample: Equatable {
 /// couple of syscalls per process — cheap on demand, pointless to pay every
 /// two seconds when nobody is looking at the result.
 final class ProcessSampler {
-    private var previousCPUTime: [Int32: UInt64] = [:]
+    /// What was seen of a process last time round.
+    ///
+    /// Keyed by pid, but a pid is only an identity until the process exits and
+    /// the number is handed to another one — which would inherit the old name
+    /// and be measured against the old CPU total. The start time tells them
+    /// apart, so an entry only counts when it matches.
+    private struct Seen {
+        var started: UInt64
+        var cpuTime: UInt64
+        /// Names never change, so they are fetched once per process.
+        var name: String
+    }
+
+    private var seen: [Int32: Seen] = [:]
     private var previousTime: TimeInterval = 0
-    /// Process names never change, so they are fetched once per pid.
-    private var nameCache: [Int32: String] = [:]
 
     /// Converts mach absolute time units to nanoseconds.
     ///
@@ -50,7 +61,8 @@ final class ProcessSampler {
         defer { previousTime = now }
 
         var rows: [ProcessInfoRow] = []
-        var currentCPUTime: [Int32: UInt64] = [:]
+        // Rebuilt every pass, which also drops processes that have exited.
+        var current: [Int32: Seen] = [:]
         rows.reserveCapacity(pids.count)
 
         for pid in pids where pid > 0 {
@@ -65,25 +77,26 @@ final class ProcessSampler {
             guard result == 0 else { continue }
 
             let cpuTime = usage.ri_user_time + usage.ri_system_time
-            currentCPUTime[pid] = cpuTime
+            let started = usage.ri_proc_start_abstime
+            let previous = seen[pid].flatMap { $0.started == started ? $0 : nil }
+            let resolved = previous?.name ?? name(of: pid)
+            current[pid] = Seen(started: started, cpuTime: cpuTime, name: resolved)
 
             var cpuShare = 0.0
-            if hasBaseline, let previous = previousCPUTime[pid], cpuTime >= previous {
-                let nanoseconds = Double(cpuTime - previous) * ticksToNanoseconds
+            if hasBaseline, let previous, cpuTime >= previous.cpuTime {
+                let nanoseconds = Double(cpuTime - previous.cpuTime) * ticksToNanoseconds
                 cpuShare = nanoseconds / (elapsed * 1_000_000_000)
             }
 
             rows.append(ProcessInfoRow(
                 id: pid,
-                name: name(of: pid),
+                name: resolved,
                 cpu: cpuShare,
                 memory: usage.ri_resident_size
             ))
         }
 
-        previousCPUTime = currentCPUTime
-        // Drop cached names for processes that have exited.
-        nameCache = nameCache.filter { currentCPUTime.keys.contains($0.key) }
+        seen = current
 
         guard hasBaseline else { return nil }
 
@@ -115,8 +128,6 @@ final class ProcessSampler {
     }
 
     private func name(of pid: Int32) -> String {
-        if let cached = nameCache[pid] { return cached }
-
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
         let result = withUnsafeMutablePointer(to: &info) {
@@ -155,7 +166,6 @@ final class ProcessSampler {
             }
         }
 
-        nameCache[pid] = resolved
         return resolved
     }
 

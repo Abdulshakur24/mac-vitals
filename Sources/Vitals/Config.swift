@@ -24,9 +24,47 @@ struct Config: Codable, Equatable {
         var cpu: Double = 0.7
         var temperature: Double = 90
         var diskFree: Double = 0.1
+
+        // Synthesized decoding demands every key, so a hand-edited file that
+        // sets only `cpu` would be thrown away whole. Missing keys take the
+        // default instead.
+        init(cpu: Double = 0.7, temperature: Double = 90, diskFree: Double = 0.1) {
+            self.cpu = cpu
+            self.temperature = temperature
+            self.diskFree = diskFree
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let defaults = Thresholds()
+            cpu = try container.decodeIfPresent(Double.self, forKey: .cpu) ?? defaults.cpu
+            temperature = try container.decodeIfPresent(Double.self, forKey: .temperature) ?? defaults.temperature
+            diskFree = try container.decodeIfPresent(Double.self, forKey: .diskFree) ?? defaults.diskFree
+        }
     }
 
     static let `default` = Config()
+
+    private enum CodingKeys: String, CodingKey {
+        case sampleInterval, menuBar, thresholds
+    }
+
+    /// Any key may be left out, and a metric name this build does not know is
+    /// skipped rather than failing the file — a typo in one entry should cost
+    /// that entry, not every other setting in the file. A value of the wrong
+    /// type is still an error, and `ConfigStore` keeps the last good config.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = Config()
+        sampleInterval = try container.decodeIfPresent(Double.self, forKey: .sampleInterval)
+            ?? defaults.sampleInterval
+        menuBar = try container.decodeIfPresent([String].self, forKey: .menuBar)
+            .map { $0.compactMap(Metric.init(rawValue:)) } ?? defaults.menuBar
+        thresholds = try container.decodeIfPresent(Thresholds.self, forKey: .thresholds)
+            ?? defaults.thresholds
+    }
+
+    init() {}
 
     /// Applies bounds that keep a hand-edited file from producing a broken or
     /// battery-hostile app: a 0.05s interval would spin the CPU, and an empty

@@ -84,7 +84,7 @@ change immediately; there is no restart and no settings UI.
 ```json
 {
   "menuBar": ["cpu", "memory", "network", "temperature"],
-  "sampleInterval": 2,
+  "sampleInterval": 1,
   "thresholds": { "cpu": 0.7, "diskFree": 0.1, "temperature": 90 }
 }
 ```
@@ -93,8 +93,10 @@ change immediately; there is no restart and no settings UI.
 Reordering the array reorders the readout; removing an entry hides it.
 Temperature sampling also stops when it is hidden and the popover is closed;
 CPU, memory, network, and disk continue to support history and attention.
-Sampling intervals and thresholds are bounded on load. Malformed JSON keeps
-the last valid configuration (or the default at startup). Threshold changes
+Sampling intervals and thresholds are bounded on load. Any key may be left out
+and takes its default, and a metric name the app does not know is skipped rather
+than failing the file. Malformed JSON, or a value of the wrong type, keeps the
+last valid configuration (or the default at startup). Threshold changes
 apply to both the menu bar and popover immediately.
 
 The order is also the order of importance. On a crowded menu bar the readout is
@@ -258,15 +260,19 @@ irreducible: reading them means one IOKit event copy per sensor.
   coalesces its wakeups with other system timers.
 - Sampling stops on sleep and on display sleep, and resumes on wake.
 - Top processes are only sampled while the popover is open. Temperature, which
-  walks 40+ HID services, runs at a fifth of the base rate.
-- Snapshots are `Equatable`; timestamped history advances on the existing tick.
-  History storage and recent event counts are bounded.
+  walks 40+ HID services, is read every 16 seconds (32 in Low Power Mode)
+  whatever the base rate is.
+- Timestamped history advances on the existing tick. History storage and recent
+  event counts are bounded.
 - Fixed per-metric widths and monospaced digits, so the status item resizes
   only when it changes shape to fit the space, never because a number gained a
   digit, and so it never drags the rest of the menu bar sideways on a tick.
-- Fitting the readout to the space costs a window frame read and a walk of a
-  couple of dozen precomputed widths, on the sample that is already happening.
-  It does not get a timer of its own.
+- Fitting the readout to the space costs a round trip to the window server,
+  which profiling showed was the most expensive thing a tick did. So it is
+  measured at most every five seconds on ordinary ticks. It is measured on every
+  tick after a layout change or while the item is not being drawn, and
+  immediately when an app activates or a display or Space changes. It does not
+  get a timer of its own.
 
 ## Regression checks
 

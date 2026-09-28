@@ -40,6 +40,9 @@ final class NetworkSampler {
     private var previousTime: TimeInterval = 0
     private var sessionReceived: UInt64 = 0
     private var sessionSent: UInt64 = 0
+    /// The interface last reported, kept while nothing is moving so an idle
+    /// machine does not flip its label between interfaces from tick to tick.
+    private var lastInterface = ""
 
     func resetBaseline() {
         previous.removeAll()
@@ -48,14 +51,21 @@ final class NetworkSampler {
 
     func sample() -> NetworkSample? {
         guard let current = readInterfaces() else { resetBaseline(); return nil }
-        var sample = consume(current.byInterface, at: ProcessInfo.processInfo.systemUptime)
-        if !sample.interface.isEmpty { sample.ipAddress = ipAddress(for: sample.interface) }
+        let addresses = ipv4Addresses()
+        var sample = consume(current.byInterface, at: ProcessInfo.processInfo.systemUptime,
+                             addressed: Set(addresses.keys))
+        sample.ipAddress = addresses[sample.interface]
         return sample
     }
 
     /// Exposed internally so counter resets and interface replacement can be
     /// regression-tested without changing the machine's network connection.
-    func consume(_ current: [String: Counters], at now: TimeInterval) -> NetworkSample {
+    ///
+    /// `addressed` names the interfaces that hold an IPv4 address, which is
+    /// what tells a real connection from `awdl0` and the other interfaces that
+    /// are up on every Mac. It only matters while nothing has moved yet.
+    func consume(_ current: [String: Counters], at now: TimeInterval,
+                 addressed: Set<String> = []) -> NetworkSample {
         let elapsed = now - previousTime
         let hasBaseline = previousTime > 0 && elapsed > 0
         var received: UInt64 = 0
@@ -64,7 +74,6 @@ final class NetworkSampler {
         var bestDelta: UInt64 = 0
         for name in current.keys.sorted() {
             guard let counters = current[name] else { continue }
-            if busiest.isEmpty { busiest = name }
             guard hasBaseline, let old = previous[name],
                   old.index == counters.index, old.changedAt == counters.changedAt else { continue }
             let down = Self.counterDelta(new: counters.received, old: old.received,
@@ -82,6 +91,18 @@ final class NetworkSampler {
         previousTime = now
         sessionReceived &+= received
         sessionSent &+= sent
+
+        // With no traffic there is no busiest interface. Stay on the one
+        // already shown while it is still up, and otherwise take the first
+        // that is actually connected rather than the first alphabetically.
+        if bestDelta == 0 {
+            let names = current.keys.sorted()
+            busiest = current[lastInterface] != nil
+                ? lastInterface
+                : names.first(where: addressed.contains) ?? names.first ?? ""
+        }
+        lastInterface = busiest
+
         return NetworkSample(download: hasBaseline ? Double(received) / elapsed : 0,
                              upload: hasBaseline ? Double(sent) / elapsed : 0,
                              sessionReceived: sessionReceived, sessionSent: sessionSent,
@@ -184,17 +205,19 @@ final class NetworkSampler {
         return String(decoding: UnsafeBufferPointer(start: bytes, count: nameLength), as: UTF8.self)
     }
 
-    private func ipAddress(for interface: String) -> String? {
+    /// The IPv4 address of every interface that has one.
+    private func ipv4Addresses() -> [String: String] {
         var head: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&head) == 0, let first = head else { return nil }
+        guard getifaddrs(&head) == 0, let first = head else { return [:] }
         defer { freeifaddrs(head) }
 
+        var result: [String: String] = [:]
         for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
             let entry = pointer.pointee
             guard let addr = entry.ifa_addr,
                   addr.pointee.sa_family == UInt8(AF_INET),
                   let name = entry.ifa_name.map({ String(cString: $0) }),
-                  name == interface
+                  result[name] == nil
             else { continue }
 
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
@@ -203,8 +226,8 @@ final class NetworkSampler {
                 &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST
             ) == 0 else { continue }
 
-            return String(cString: host)
+            result[name] = String(cString: host)
         }
-        return nil
+        return result
     }
 }

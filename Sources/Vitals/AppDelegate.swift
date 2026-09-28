@@ -60,6 +60,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// one. Believing it then would record a refusal against the wrong width.
     private var layoutSettled = false
 
+    /// Longest a sample tick goes without measuring the menu bar, once the
+    /// layout has settled.
+    ///
+    /// The measurement is a round trip to the window server, and profiling
+    /// showed it was most of what the app did on a tick — several times the
+    /// cost of every sampler put together. Nothing about the menu bar changes
+    /// that often. The events that do make it change quickly (an app
+    /// activating, a display or Space change) force a measurement of their
+    /// own, so this only bounds how long another app's status item can appear
+    /// unnoticed.
+    private static let measureInterval: TimeInterval = 5
+
+    /// When the menu bar was last measured, on the `systemUptime` clock.
+    private var lastMeasured: TimeInterval = 0
+
+    /// What the last measurement said about whether the item is drawn.
+    ///
+    /// The throttle is for a readout known to be fine. One that is not being
+    /// drawn is the state this whole mechanism exists to get out of, and it
+    /// does so one rung per measurement, so it is measured on every tick until
+    /// the window server says otherwise.
+    private var lastDrawn: Bool?
+
     private var cancellables: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -152,14 +175,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Picks the richest layout the menu bar currently has room for.
     ///
-    /// Cheap enough to run on every sample: a window frame read, a subtraction,
-    /// and a walk of at most a couple of dozen precomputed widths.
-    private func updateLayout() {
+    /// The arithmetic is trivial — a subtraction and a walk of at most a couple
+    /// of dozen precomputed widths. What costs is the window list it reads,
+    /// which is why measuring is throttled.
+    ///
+    /// `force` skips the throttle, for the events that can change the space.
+    /// A layout that has just changed is not throttled either: the window
+    /// server describes the old width for a beat, so it is looked at again on
+    /// the next tick to find out whether the new one was drawn. Nor is an item
+    /// that was found not to be drawn.
+    private func updateLayout(force: Bool = false) {
         guard !ladder.isEmpty else { return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        if !force, layoutSettled, lastDrawn != false,
+           now - lastMeasured < Self.measureInterval { return }
 
         // No screen to measure against — a display mid-departure. The next
         // sample corrects it either way.
         guard let fit = StatusItemFit.measure(for: statusItem) else { return }
+        lastMeasured = now
+        lastDrawn = fit.isDrawn
 
         // A refusal describes one arrangement of the menu bar. Once the space
         // has moved, it is describing something that is no longer there.
@@ -219,7 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// things that make it happen — another app's menu titles taking the width
     /// on activation, a display arriving or leaving, a different Space — and
     /// piggybacks on the metric samples for everything else, which covers
-    /// another app adding or removing a status item within a tick or two.
+    /// another app adding or removing a status item within a few seconds.
     /// Deliberately not its own timer: the one-timer rule is what keeps this
     /// app cheap, and re-fitting is not worth a wakeup of its own.
     private func observeMenuBarSpace() {
@@ -230,7 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.publisher(
             for: NSApplication.didChangeScreenParametersNotification
         )
-        .sink { [weak self] _ in self?.updateLayout() }
+        .sink { [weak self] _ in self?.updateLayout(force: true) }
         .store(in: &cancellables)
 
         let workspace = NSWorkspace.shared.notificationCenter
@@ -239,7 +275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSWorkspace.activeSpaceDidChangeNotification,
         ] {
             workspace.publisher(for: name)
-                .sink { [weak self] _ in self?.updateLayout() }
+                .sink { [weak self] _ in self?.updateLayout(force: true) }
                 .store(in: &cancellables)
         }
     }

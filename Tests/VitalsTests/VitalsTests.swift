@@ -154,4 +154,50 @@ final class VitalsTests: XCTestCase {
         tracker.update(snapshot: snapshot, thresholds: .init(), at: 500)
         XCTAssertTrue(tracker.events.isEmpty)
     }
+
+    func testPartialConfigKeepsEverythingElseAtDefaults() throws {
+        func decode(_ json: String) throws -> Config {
+            try JSONDecoder().decode(Config.self, from: Data(json.utf8)).validated()
+        }
+        let onlyMenuBar = try decode(#"{"menuBar":["cpu","memory"]}"#)
+        XCTAssertEqual(onlyMenuBar.menuBar, [.cpu, .memory])
+        XCTAssertEqual(onlyMenuBar.sampleInterval, Config.default.sampleInterval)
+        XCTAssertEqual(onlyMenuBar.thresholds, Config.default.thresholds)
+
+        let onlyOneThreshold = try decode(#"{"thresholds":{"cpu":0.5}}"#)
+        XCTAssertEqual(onlyOneThreshold.thresholds, .init(cpu: 0.5))
+        XCTAssertEqual(onlyOneThreshold.menuBar, Config.default.menuBar)
+
+        XCTAssertEqual(try decode("{}"), Config.default)
+    }
+
+    func testUnknownMetricIsSkippedNotFatal() throws {
+        func decode(_ json: String) throws -> Config {
+            try JSONDecoder().decode(Config.self, from: Data(json.utf8)).validated()
+        }
+        XCTAssertEqual(try decode(#"{"menuBar":["cpu","gpu","network"],"sampleInterval":2}"#).menuBar,
+                       [.cpu, .network])
+        XCTAssertEqual(try decode(#"{"menuBar":["cpu","gpu","network"],"sampleInterval":2}"#).sampleInterval, 2)
+        // Nothing usable left falls back to the default rather than an empty bar.
+        XCTAssertEqual(try decode(#"{"menuBar":["gpu"]}"#).menuBar, Config.default.menuBar)
+        // A value of the wrong type is still rejected.
+        XCTAssertThrowsError(try decode(#"{"sampleInterval":"fast"}"#))
+    }
+
+    func testIdleNetworkKeepsItsInterfaceAndPrefersConnectedOnes() {
+        let sampler = NetworkSampler()
+        let up = ["awdl0": NetworkSampler.Counters(received: 5, sent: 5),
+                  "en0": NetworkSampler.Counters(received: 100, sent: 100)]
+        // Nothing has moved yet: awdl0 sorts first, but en0 is the connected one.
+        XCTAssertEqual(sampler.consume(up, at: 1, addressed: ["en0"]).interface, "en0")
+        XCTAssertEqual(sampler.consume(up, at: 2, addressed: ["en0"]).interface, "en0")
+        // Even with no addressed interface to go by, the label does not flip.
+        XCTAssertEqual(sampler.consume(up, at: 3).interface, "en0")
+        // Traffic elsewhere still wins.
+        var busy = up
+        busy["awdl0"] = .init(received: 5000, sent: 5)
+        XCTAssertEqual(sampler.consume(busy, at: 4, addressed: ["en0"]).interface, "awdl0")
+        // And an interface that has gone away is not kept.
+        XCTAssertEqual(sampler.consume(["en1": .init(received: 1, sent: 1)], at: 5).interface, "en1")
+    }
 }

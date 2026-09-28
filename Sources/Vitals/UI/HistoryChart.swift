@@ -21,8 +21,15 @@ struct HistoryChart: View {
                 } else {
                     path.addLine(to: point)
                 }
-                // Isolated samples remain visible, including immediately after wake.
-                context.fill(Path(ellipseIn: CGRect(x: point.x - 1, y: point.y - 1, width: 2, height: 2)), with: .color(color))
+                // A line needs two points to show at all, so a sample alone in
+                // its segment — right after wake, say — gets a dot instead.
+                // Everywhere else the line is enough; a dot on every point of an
+                // hour of history would thicken it into a band.
+                let opensSegment = index == 0 || sample.startsSegment
+                let continues = index + 1 < points.count && !points[index + 1].startsSegment
+                if opensSegment, !continues {
+                    context.fill(Path(ellipseIn: CGRect(x: point.x - 1, y: point.y - 1, width: 2, height: 2)), with: .color(color))
+                }
             }
             context.stroke(path, with: .color(color), lineWidth: 1)
         }

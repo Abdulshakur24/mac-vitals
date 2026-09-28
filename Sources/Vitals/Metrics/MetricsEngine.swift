@@ -284,8 +284,8 @@ final class MetricsEngine: ObservableObject {
         }
 
         // Publish the readings, history timestamp, and attention state together.
-        if next != snapshot {
-            snapshot = next
-        }
+        // Unconditional: `sampledAt` moves on every tick, so an equality check
+        // here could never find two snapshots alike.
+        snapshot = next
     }
 }
