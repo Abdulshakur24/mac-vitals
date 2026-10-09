@@ -36,6 +36,16 @@ CPU graph covers the last minute. Memory history shows **used RAM / physical
 RAM**, not an approximation of Activity Monitor's memory pressure graph. Upload
 and download share one scale, with its maximum printed below the chart.
 
+Hover over a history chart for a crosshair, timestamp, and peak values. Click to
+pin the reading, or drag to scrub; click again, use the clear button, or press
+Escape to release it. Click a chart and use the left/right arrow keys to step
+through recorded samples. Network inspection shows download and upload together.
+Sleep gaps report “No sample.” Pinned values stay fixed while sampling continues;
+changing the history window or aging out of the window clears the pin.
+Charts do not take keyboard focus when the panel opens. The panel uses AppKit's
+native popover background and a standard segmented history picker, with system
+appearance rather than a custom glass effect or opacity setting.
+
 **Needs attention** reports low disk space immediately, elevated memory pressure
 after ten seconds, and high overall CPU after fifteen seconds. Critical memory
 pressure and serious/critical macOS thermal states appear immediately. CPU and
@@ -283,7 +293,8 @@ swift run Vitals --probe
 ```
 
 Tests cover threshold validation, timestamped retention and peak aggregation,
-sleep gaps, network wraps/resets/reconnections, and sustained attention events.
+chart inspection and pinned readings, sleep gaps, network wraps/resets/reconnections,
+and sustained attention events.
 For optional offscreen light/dark popover renders without changing the installed
 application:
 

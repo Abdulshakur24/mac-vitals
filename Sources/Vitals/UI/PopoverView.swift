@@ -43,22 +43,15 @@ struct PopoverView: View {
             HStack {
                 Text("History").fontWeight(.semibold)
                 Spacer()
-                HStack(spacing: 2) {
+                Picker("History window", selection: $historyWindow) {
                     ForEach(HistoryWindow.allCases) { window in
-                        Button { historyWindow = window } label: {
-                            Text(window.label)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 4)
-                                .background(historyWindow == window ? Color.accentColor.opacity(0.2) : Color.clear,
-                                            in: RoundedRectangle(cornerRadius: 5))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Show \(window.label) of history")
-                        .accessibilityAddTraits(historyWindow == window ? .isSelected : [])
+                        Text(window.label).tag(window)
                     }
                 }
-                .padding(2)
-                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 128)
             }
             Text("5-second peaks · gaps when asleep · this session")
                 .font(.system(size: 9))
@@ -104,10 +97,9 @@ struct PopoverView: View {
         history.points(endingAt: snapshot.sampledAt, duration: historyWindow.rawValue)
     }
 
-    private func chart(_ history: MetricHistory, ceiling: Double, color: Color) -> some View {
-        HistoryChart(points: points(history), end: snapshot.sampledAt,
-                     duration: historyWindow.rawValue, ceiling: ceiling, color: color)
-            .frame(height: 32)
+    private func chart(_ history: MetricHistory, name: String, ceiling: Double, color: Color) -> some View {
+        HistoryChart(series: [HistorySeries(name: name, points: points(history), color: color, format: Format.percent)],
+                     end: snapshot.sampledAt, duration: historyWindow.rawValue, ceiling: ceiling)
     }
 
     private var networkCeiling: Double {
@@ -121,7 +113,7 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 8) {
             header("CPU", value: Format.percent(snapshot.cpu.total))
 
-            chart(snapshot.cpuHistory, ceiling: 1, color: .accentColor)
+            chart(snapshot.cpuHistory, name: "CPU", ceiling: 1, color: .accentColor)
 
             CoreBars(
                 loads: snapshot.cpu.perCore,
@@ -143,7 +135,7 @@ struct PopoverView: View {
                 value: "\(Format.bytes(snapshot.memory.used)) / \(Format.bytes(snapshot.memory.total))"
             )
 
-            chart(snapshot.memoryHistory, ceiling: 1, color: pressureColor)
+            chart(snapshot.memoryHistory, name: "RAM", ceiling: 1, color: pressureColor)
                 .help("Memory used as a fraction of physical RAM; this graph does not measure memory pressure.")
 
             // Components sum to Used; pressure and swap provide context.
@@ -170,11 +162,10 @@ struct PopoverView: View {
                     : "\(snapshot.network.interface)  \(snapshot.network.ipAddress ?? "")"
             )
 
-            ZStack {
-                chart(snapshot.downloadHistory, ceiling: networkCeiling, color: .blue)
-                chart(snapshot.uploadHistory, ceiling: networkCeiling, color: .green)
-            }
-            .frame(height: 32)
+            HistoryChart(series: [
+                HistorySeries(name: "↓ Down", points: points(snapshot.downloadHistory), color: .blue, format: Format.rate),
+                HistorySeries(name: "↑ Up", points: points(snapshot.uploadHistory), color: .green, format: Format.rate)
+            ], end: snapshot.sampledAt, duration: historyWindow.rawValue, ceiling: networkCeiling)
 
             Text("Scale 0–\(Format.rate(networkCeiling)) · all active interfaces")
                 .font(.system(size: 9))

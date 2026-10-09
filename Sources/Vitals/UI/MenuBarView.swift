@@ -44,7 +44,7 @@ struct MenuBarView: View {
                 // number that is right beside it, so losing it costs history
                 // rather than the reading itself.
                 if style == .full {
-                    HistoryChart(points: engine.snapshot.cpuHistory.points(endingAt: engine.snapshot.sampledAt, duration: 60),
+                    HistorySparkline(points: engine.snapshot.cpuHistory.points(endingAt: engine.snapshot.sampledAt, duration: 60),
                                  end: engine.snapshot.sampledAt, duration: 60, ceiling: 1, color: .secondary)
                         .frame(width: 22, height: 13)
                 }

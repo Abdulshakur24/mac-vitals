@@ -336,6 +336,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Popover
 
     private func setUpPopover() {
+        // Let AppKit supply the system's popover material and appearance.
+        // Adding another glass/material background would cover that surface.
         popover = NSPopover()
         popover.behavior = .transient
         popover.animates = false
