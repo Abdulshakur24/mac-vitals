@@ -2,21 +2,21 @@
 
 # Vitals
 
-CPU, memory and swap, network, disk, and temperature in one compact macOS menu-bar item. Local-only, with no dependencies or update checker.
+A local-only macOS menu-bar monitor for CPU, memory, network, disk, and temperature. No dependencies or update checker.
 
 **Requires:** Apple Silicon, macOS 14+, and the Xcode Swift toolchain.
 
 ## Features
 
-- Click for per-core load, memory breakdown, warnings, and top apps ranked by CPU or memory.
-- App totals combine helpers from the same app bundle. Expand a row to inspect its processes and PIDs, or select **All** to include system services and command-line tools. Show five entries or expand the full list.
-- Interactive 5-minute or 1-hour charts: hover to inspect, click to pin, drag or use arrow keys to explore, and press Escape to release.
+- Top apps by CPU or memory, with grouped helpers and expandable process details. Select **All** to include system services and command-line tools.
+- Per-core load, memory breakdown, swap, and sustained warnings.
+- Interactive 5-minute or 1-hour charts with hover, pinning, and keyboard navigation.
 - Shrinks to fit crowded menu bars, pauses during sleep, and reduces sampling in Low Power Mode.
 - Right-click to edit configuration, toggle **Start at Login**, or quit.
 
-History stays in memory for the current session. Temperature availability varies by Mac; its sensors use a private Apple API.
+100% app CPU equals one busy core. Resident memory totals may count shared pages more than once. Process scans run only while the panel is open.
 
-App CPU uses one core as 100%, so multithreaded apps can exceed 100%. App memory is summed resident memory and can count shared pages more than once. Process readings run only while the panel is open; reopening starts a fresh CPU interval.
+History is session-only. Temperature availability varies by Mac and uses a private Apple API.
 
 ## Install
 
@@ -26,7 +26,7 @@ cd mac-vitals
 ./Scripts/build.sh
 ```
 
-Builds, signs, installs to `/Applications`, and launches Vitals. Use `./Scripts/build.sh --no-install` to build only. The app lives in the menu bar, with no Dock icon.
+Builds, signs, installs to `/Applications`, and launches Vitals. Add `--no-install` to build only.
 
 ## Configure
 
@@ -40,7 +40,7 @@ Edit `~/.config/vitals/config.json`. Changes apply immediately.
 }
 ```
 
-Add `disk` to show disk activity. Reorder metrics to change their order; remove them to hide them. Earlier entries get priority when space is limited. Omitted settings use defaults.
+Add `disk` for disk activity; remove metrics to hide them. Earlier entries get priority when space is limited. Omitted settings use defaults.
 
 ## Development
 
