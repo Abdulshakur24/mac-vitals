@@ -1,6 +1,6 @@
 import Foundation
 
-struct HistoryPoint: Equatable {
+struct HistoryPoint: Equatable, Codable {
     var time: TimeInterval
     var value: Double
     var startsSegment: Bool
@@ -21,6 +21,23 @@ struct MetricHistory: Equatable {
     private var count = 0
     private var needsSegment = true
     private var lastSample: TimeInterval?
+
+    init() {}
+
+    /// Restore recorded buckets directly; replaying append would merge peaks
+    /// and lose segment boundaries. The next live reading always starts a gap.
+    init(restoring points: [HistoryPoint], endingAt end: TimeInterval) {
+        let valid = points.filter {
+            $0.time.isFinite && $0.value.isFinite && $0.value >= 0
+                && $0.time >= end - HistoryWindow.oneHour.rawValue && $0.time <= end
+        }.sorted { $0.time < $1.time }.suffix(storage.count)
+        for var point in valid {
+            if count == 0 { point.startsSegment = true }
+            storage[next] = point
+            next = (next + 1) % storage.count
+            count += 1
+        }
+    }
 
     mutating func markGap() { needsSegment = true }
 

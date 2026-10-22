@@ -9,6 +9,7 @@ A local-only macOS menu-bar monitor for CPU, memory, network, disk, and temperat
 ## Features
 
 - Top apps by CPU or memory, with grouped helpers and expandable process details. Select **All** to include system services and command-line tools.
+- Quit apps from the row’s actions menu, or Force Quit with confirmation.
 - Per-core load, memory breakdown, swap, and sustained warnings.
 - Interactive 5-minute or 1-hour charts with hover, pinning, and keyboard navigation.
 - Shrinks to fit crowded menu bars, pauses during sleep, and reduces sampling in Low Power Mode.
@@ -16,7 +17,7 @@ A local-only macOS menu-bar monitor for CPU, memory, network, disk, and temperat
 
 100% app CPU equals one busy core. Resident memory totals may count shared pages more than once. Process scans run only while the panel is open.
 
-History is session-only. Temperature availability varies by Mac and uses a private Apple API.
+The last hour of charts and warnings survives relaunches, stored locally in `~/Library/Application Support/Vitals/history.json`. Temperature availability varies by Mac and uses a private Apple API.
 
 ## Install
 

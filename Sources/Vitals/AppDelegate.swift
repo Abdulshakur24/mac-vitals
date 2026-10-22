@@ -12,7 +12,7 @@ private final class PassthroughHostingView<Content: View>: NSHostingView<Content
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let engine = MetricsEngine()
+    private let engine = MetricsEngine(historyStore: HistoryStore())
     private let configStore = ConfigStore()
 
     private var statusItem: NSStatusItem!
@@ -84,6 +84,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastDrawn: Bool?
 
     private var cancellables: Set<AnyCancellable> = []
+
+    func applicationWillTerminate(_ notification: Notification) {
+        engine.saveHistory()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         engine.configure(configStore.config)

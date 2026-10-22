@@ -1,13 +1,19 @@
 import SwiftUI
 
+@MainActor
 struct TopAppsView: View {
     let sample: ProcessSample
     @State private var selection: ProcessListSelection
     @State private var icons: [URL: NSImage] = [:]
+    @State private var pendingForceQuit: AppQuitRequest?
+    @State private var showForceConfirmation = false
+    @State private var feedback: AppQuitFeedback?
+    private let quitController: AppQuitController
 
-    init(sample: ProcessSample, selection: ProcessListSelection = .init()) {
+    init(sample: ProcessSample, selection: ProcessListSelection = .init(), quitController: AppQuitController? = nil) {
         self.sample = sample
         _selection = State(initialValue: selection)
+        self.quitController = quitController ?? AppQuitController()
     }
 
     private var liveIDs: Set<ProcessGroup.ID> { Set(sample.groups.map(\.id)) }
@@ -51,12 +57,34 @@ struct TopAppsView: View {
                 rankings
             }
 
+            if let feedback {
+                HStack(alignment: .top, spacing: 6) {
+                    Text(feedback.message)
+                        .foregroundStyle(feedback.isError ? Color.orange : Color.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button { self.feedback = nil } label: {
+                        Image(systemName: "xmark").font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Dismiss app action message")
+                }
+            }
+
             Text("100% CPU = one fully busy core")
                 .font(.system(size: 9))
                 .foregroundStyle(.secondary)
             Text("Resident memory · totals can include shared pages")
                 .font(.system(size: 9))
                 .foregroundStyle(.secondary)
+        }
+        .confirmationDialog("Force quit \(pendingForceQuit?.name ?? "app")?",
+                            isPresented: $showForceConfirmation, titleVisibility: .visible,
+                            presenting: pendingForceQuit) { request in
+            Button("Force Quit", role: .destructive) { perform(request, mode: .forceQuit) }
+            Button("Cancel", role: .cancel) { pendingForceQuit = nil }
+        } message: { request in
+            Text(request.confirmationMessage)
         }
         .onChange(of: liveIDs) { _, _ in
             selection.retainLiveGroups(in: sample)
@@ -86,6 +114,7 @@ struct TopAppsView: View {
                 Spacer(minLength: 0)
                 Text("CPU").frame(width: 48, alignment: .trailing)
                 Text("Resident").frame(width: 68, alignment: .trailing)
+                Color.clear.frame(width: 18, height: 1).accessibilityHidden(true)
             }
             .font(.system(size: 9))
             .foregroundStyle(.secondary)
@@ -109,32 +138,54 @@ struct TopAppsView: View {
     private func groupRow(_ group: ProcessGroup) -> some View {
         let expanded = selection.expanded.contains(group.id)
         return VStack(alignment: .leading, spacing: 3) {
-            Button {
-                if expanded { selection.expanded.remove(group.id) }
-                else { selection.expanded.insert(group.id) }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 8)
-                    icon(group)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(group.name).lineLimit(1).truncationMode(.middle)
-                        Text("\(group.processes.count) \(group.processes.count == 1 ? "process" : "processes")")
-                            .font(.system(size: 9)).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Button {
+                    if expanded { selection.expanded.remove(group.id) }
+                    else { selection.expanded.insert(group.id) }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 8)
+                        icon(group)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(group.name).lineLimit(1).truncationMode(.middle)
+                            Text("\(group.processes.count) \(group.processes.count == 1 ? "process" : "processes")")
+                                .font(.system(size: 9)).foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        values(cpu: group.cpu, memory: group.memory)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    values(cpu: group.cpu, memory: group.memory)
+                    .contentShape(Rectangle())
+                    .padding(.vertical, 3)
                 }
-                .contentShape(Rectangle())
-                .padding(.vertical, 3)
+                .buttonStyle(.plain)
+                .help(group.name)
+                .accessibilityLabel("\(group.name), \(Format.percent(group.cpu)) CPU, \(Format.bytes(group.memory)) resident memory, \(group.processes.count) processes")
+                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+                .accessibilityHint("Show or hide individual processes")
+
+                if group.app != nil {
+                    Menu {
+                        appActions(group)
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .frame(width: 18)
+                    .disabled(!quitController.canQuit(group))
+                    .help("Actions for \(group.name)")
+                    .accessibilityLabel("Actions for \(group.name)")
+                } else {
+                    Color.clear.frame(width: 18, height: 1).accessibilityHidden(true)
+                }
             }
-            .buttonStyle(.plain)
-            .help(group.name)
-            .accessibilityLabel("\(group.name), \(Format.percent(group.cpu)) CPU, \(Format.bytes(group.memory)) resident memory, \(group.processes.count) processes")
-            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
-            .accessibilityHint("Show or hide individual processes")
+            .contextMenu {
+                if quitController.canQuit(group) { appActions(group) }
+            }
 
             if expanded {
                 VStack(spacing: 6) {
@@ -146,6 +197,7 @@ struct TopAppsView: View {
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             values(cpu: row.cpu, memory: row.memory)
+                            Color.clear.frame(width: 18, height: 1).accessibilityHidden(true)
                         }
                         .help("\(row.name) · PID \(row.pid)")
                     }
@@ -154,6 +206,32 @@ struct TopAppsView: View {
                 .padding(.vertical, 5)
             }
         }
+    }
+
+    @ViewBuilder
+    private func appActions(_ group: ProcessGroup) -> some View {
+        Button("Quit \(group.name)") { requestQuit(group, mode: .quit) }
+        Button("Force Quit…", role: .destructive) { requestQuit(group, mode: .forceQuit) }
+    }
+
+    private func requestQuit(_ group: ProcessGroup, mode: AppQuitMode) {
+        do {
+            let request = try quitController.prepare(group)
+            if mode == .forceQuit {
+                pendingForceQuit = request
+                showForceConfirmation = true
+            } else {
+                perform(request, mode: mode)
+            }
+        } catch {
+            feedback = AppQuitFeedback(message: error.localizedDescription, isError: true)
+        }
+    }
+
+    private func perform(_ request: AppQuitRequest, mode: AppQuitMode) {
+        let result = quitController.perform(request, mode: mode)
+        feedback = AppQuitController.feedback(for: result, request: request, mode: mode)
+        pendingForceQuit = nil
     }
 
     @ViewBuilder

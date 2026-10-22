@@ -59,6 +59,7 @@ final class MetricsEngine: ObservableObject {
     private let diskSampler = DiskSampler()
     private let thermalSampler = ThermalSampler()
     private let processSampler: ProcessSampler
+    private let historyStore: HistoryStore?
 
     /// Seconds between temperature reads at full speed.
     ///
@@ -125,11 +126,18 @@ final class MetricsEngine: ObservableObject {
     var efficiencyCoreCount: Int { cpuSampler.efficiencyCoreCount }
 
     init(interval: TimeInterval = 1.0, initialSnapshot: Snapshot = Snapshot(),
-         processSampler: ProcessSampler = ProcessSampler()) {
-        self.snapshot = initialSnapshot
+         processSampler: ProcessSampler = ProcessSampler(), historyStore: HistoryStore? = nil) {
+        let restored = historyStore?.load(at: Date().timeIntervalSince1970)
+        self.snapshot = restored ?? initialSnapshot
         self.configuredInterval = interval
         self.processSampler = processSampler
+        self.historyStore = historyStore
+        if let restored { attentionTracker.restore(restored.attention) }
         observePowerNotifications()
+    }
+
+    func saveHistory() {
+        historyStore?.flush(snapshot)
     }
 
     deinit {
@@ -186,8 +194,10 @@ final class MetricsEngine: ObservableObject {
         snapshot.diskReadHistory.markGap()
         snapshot.diskWriteHistory.markGap()
         attentionTracker.interrupt(at: Date().timeIntervalSince1970)
+        snapshot.attention = attentionTracker.events
         timer?.invalidate()
         timer = nil
+        saveHistory()
     }
 
     private func resume() {
@@ -292,5 +302,6 @@ final class MetricsEngine: ObservableObject {
         // Unconditional: `sampledAt` moves on every tick, so an equality check
         // here could never find two snapshots alike.
         snapshot = next
+        historyStore?.checkpoint(next)
     }
 }

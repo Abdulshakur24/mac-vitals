@@ -1,10 +1,10 @@
 import Foundation
 
-enum AttentionKind: String, CaseIterable {
+enum AttentionKind: String, CaseIterable, Codable {
     case disk, memory, thermal, cpu
 }
 
-struct AttentionEvent: Equatable, Identifiable {
+struct AttentionEvent: Equatable, Identifiable, Codable {
     var id: UUID = UUID()
     var kind: AttentionKind
     var title: String
@@ -13,10 +13,15 @@ struct AttentionEvent: Equatable, Identifiable {
     var endedAt: TimeInterval?
 }
 
-/// Local session history only. No notifications, process scans, or extra timer.
+/// Local warning history. No notifications, process scans, or extra timer.
 struct AttentionTracker {
     private var pending: [AttentionKind: TimeInterval] = [:]
     private(set) var events: [AttentionEvent] = []
+
+    mutating func restore(_ history: [AttentionEvent]) {
+        pending.removeAll()
+        events = history
+    }
 
     mutating func interrupt(at time: TimeInterval) {
         pending.removeAll()

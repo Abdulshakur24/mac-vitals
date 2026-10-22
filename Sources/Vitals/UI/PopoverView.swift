@@ -53,7 +53,7 @@ struct PopoverView: View {
                 .controlSize(.small)
                 .frame(width: 128)
             }
-            Text("5-second peaks · gaps when asleep · this session")
+            Text("5-second peaks · gaps while asleep or closed")
                 .font(.system(size: 9))
                 .foregroundStyle(.secondary)
         }
