@@ -58,7 +58,7 @@ final class MetricsEngine: ObservableObject {
     private let networkSampler = NetworkSampler()
     private let diskSampler = DiskSampler()
     private let thermalSampler = ThermalSampler()
-    private let processSampler = ProcessSampler()
+    private let processSampler: ProcessSampler
 
     /// Seconds between temperature reads at full speed.
     ///
@@ -95,7 +95,8 @@ final class MetricsEngine: ObservableObject {
     /// Primes the per-process CPU baseline so the first visible reading is a
     /// real delta rather than a column of zeros. Called when the panel opens.
     func prepareDetailSamplers() {
-        _ = processSampler.sample()
+        processSampler.resetBaseline()
+        snapshot.processes = processSampler.sample()
     }
 
     /// The rate asked for in the config file.
@@ -123,9 +124,11 @@ final class MetricsEngine: ObservableObject {
     var performanceCoreCount: Int { cpuSampler.performanceCoreCount }
     var efficiencyCoreCount: Int { cpuSampler.efficiencyCoreCount }
 
-    init(interval: TimeInterval = 1.0, initialSnapshot: Snapshot = Snapshot()) {
+    init(interval: TimeInterval = 1.0, initialSnapshot: Snapshot = Snapshot(),
+         processSampler: ProcessSampler = ProcessSampler()) {
         self.snapshot = initialSnapshot
         self.configuredInterval = interval
+        self.processSampler = processSampler
         observePowerNotifications()
     }
 
@@ -174,6 +177,8 @@ final class MetricsEngine: ObservableObject {
 
     private func suspend() {
         isSuspended = true
+        processSampler.resetBaseline()
+        snapshot.processes = ProcessSample()
         snapshot.cpuHistory.markGap()
         snapshot.memoryHistory.markGap()
         snapshot.downloadHistory.markGap()
@@ -279,8 +284,8 @@ final class MetricsEngine: ObservableObject {
 
         // Walking the process table is the most expensive thing here, so it
         // happens only while someone is actually reading the result.
-        if isDetailVisible(), let processes = processSampler.sample() {
-            next.processes = processes
+        if isDetailVisible() {
+            next.processes = processSampler.sample()
         }
 
         // Publish the readings, history timestamp, and attention state together.

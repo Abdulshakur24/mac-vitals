@@ -16,6 +16,8 @@ struct PopoverView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     section { attention }
                     divider
+                    section { TopAppsView(sample: snapshot.processes) }
+                    divider
                     section { cpu }
                     divider
                     section { memory }
@@ -27,8 +29,6 @@ struct PopoverView: View {
                         divider
                         section { temperature }
                     }
-                    divider
-                    section { processes }
                 }
             }
             divider
@@ -230,44 +230,6 @@ struct PopoverView: View {
                     legend("State", thermalStateLabel, tint: .orange)
                 }
             }
-        }
-    }
-
-    private var processes: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            header("Top processes", value: "")
-
-            if snapshot.processes.topByCPU.isEmpty {
-                Text("Sampling…").foregroundStyle(.secondary)
-            } else {
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(snapshot.processes.topByCPU) { row in
-                        processRow(row, detail: Format.percent(row.cpu))
-                    }
-                }
-
-                Text("By memory")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 2)
-
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(snapshot.processes.topByMemory) { row in
-                        processRow(row, detail: Format.bytes(row.memory))
-                    }
-                }
-            }
-        }
-    }
-
-    private func processRow(_ row: ProcessInfoRow, detail: String) -> some View {
-        HStack(spacing: 8) {
-            Text(row.name)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 8)
-            Text(detail)
-                .foregroundStyle(.secondary)
         }
     }
 

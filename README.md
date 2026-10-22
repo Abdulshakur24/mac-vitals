@@ -8,12 +8,15 @@ CPU, memory and swap, network, disk, and temperature in one compact macOS menu-b
 
 ## Features
 
-- Click for per-core load, memory breakdown, warnings, and top processes.
+- Click for per-core load, memory breakdown, warnings, and top apps ranked by CPU or memory.
+- App totals combine helpers from the same app bundle. Expand a row to inspect its processes and PIDs, or select **All** to include system services and command-line tools. Show five entries or expand the full list.
 - Interactive 5-minute or 1-hour charts: hover to inspect, click to pin, drag or use arrow keys to explore, and press Escape to release.
 - Shrinks to fit crowded menu bars, pauses during sleep, and reduces sampling in Low Power Mode.
 - Right-click to edit configuration, toggle **Start at Login**, or quit.
 
 History stays in memory for the current session. Temperature availability varies by Mac; its sensors use a private Apple API.
+
+App CPU uses one core as 100%, so multithreaded apps can exceed 100%. App memory is summed resident memory and can count shared pages more than once. Process readings run only while the panel is open; reopening starts a fresh CPU interval.
 
 ## Install
 

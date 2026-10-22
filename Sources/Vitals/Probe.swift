@@ -87,7 +87,12 @@ enum Probe {
                 """)
             }
 
-            if round == 3, let sample = processes.sample() {
+            if round == 3 {
+                let sample = processes.sample()
+                guard sample.state == .ready else {
+                    print("process readings unavailable")
+                    continue
+                }
                 print("top by cpu:")
                 for row in sample.topByCPU {
                     print(String(
@@ -101,6 +106,14 @@ enum Probe {
                         format: "       %-28@ %5.1f%%  %@",
                         row.name as NSString, row.cpu * 100, Format.bytes(row.memory) as NSString
                     ))
+                }
+                for sort in ProcessSort.allCases {
+                    print("top apps by \(sort.rawValue.lowercased()):")
+                    for group in sample.ranked(by: sort, filter: .apps).prefix(5) {
+                        print(String(format: "       %-28@ %5.1f%%  %@  (%d processes)",
+                                     group.name as NSString, group.cpu * 100,
+                                     Format.bytes(group.memory) as NSString, group.processes.count))
+                    }
                 }
             }
         }

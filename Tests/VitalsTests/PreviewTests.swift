@@ -30,9 +30,7 @@ final class PreviewTests: XCTestCase {
             snapshot.uploadHistory.append(value * 200_000, at: now - Double(seconds), interval: 1)
         }
         snapshot.attention = [AttentionEvent(kind: .disk, title: "Disk space is low", detail: "28.0 GB available · below 10%", startedAt: now - 60)]
-        snapshot.processes = ProcessSample(
-            topByCPU: [.init(id: 1, name: "Codex (Renderer)", cpu: 0.32, memory: 600 << 20)],
-            topByMemory: [.init(id: 1, name: "Codex (Renderer)", cpu: 0.32, memory: 600 << 20)])
+        snapshot.processes = processFixture()
         let engine = MetricsEngine(initialSnapshot: snapshot)
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
         for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
@@ -48,5 +46,63 @@ final class PreviewTests: XCTestCase {
             try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("popover-\(name).png"))
             window.contentView = nil
         }
+    }
+
+    /// Focused variants keep the expandable rows visible in offscreen review.
+    @MainActor
+    func testRenderTopApps() async throws {
+        guard let directory = ProcessInfo.processInfo.environment["VITALS_RENDER_DIR"] else {
+            throw XCTSkip("Set VITALS_RENDER_DIR for offscreen visual review")
+        }
+        _ = NSApplication.shared
+        try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        let sample = processFixture()
+        let expanded = Set(sample.groups.filter { $0.name == "Safari" }.map(\.id))
+        let variants: [(String, ProcessSample, ProcessListSelection)] = [
+            ("default", sample, .init()),
+            ("expanded", sample, .init(expanded: expanded)),
+            ("all-memory", sample, .init(sort: .memory, filter: .all, showAll: true)),
+            ("sampling", ProcessSample(), .init()),
+            ("unavailable", ProcessSample(state: .unavailable), .init()),
+            ("empty", ProcessSample(rows: [], state: .ready), .init())
+        ]
+        for (name, sample, selection) in variants {
+            for (theme, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
+                let view = NSHostingView(rootView: TopAppsView(sample: sample, selection: selection)
+                    .font(.system(size: 11).monospacedDigit())
+                    .padding(14)
+                    .frame(width: 360, alignment: .topLeading)
+                    .background(scheme == .dark ? Color(white: 0.12) : Color(white: 0.96))
+                    .environment(\.colorScheme, scheme))
+                view.frame = NSRect(origin: .zero, size: view.fittingSize)
+                let window = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
+                window.contentView = view
+                window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+                view.layoutSubtreeIfNeeded()
+                let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("apps-\(name)-\(theme).png"))
+                window.contentView = nil
+            }
+        }
+    }
+
+    private func processFixture() -> ProcessSample {
+        let safari = ProcessApp(bundleURL: URL(fileURLWithPath: "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app"), name: "Safari")
+        let notes = ProcessApp(bundleURL: URL(fileURLWithPath: "/System/Applications/Notes.app"), name: "Notes")
+        let long = ProcessApp(bundleURL: URL(fileURLWithPath: "/Applications/Long.app"), name: "An app with a particularly long display name")
+        var rows: [ProcessInfoRow] = [
+            .init(pid: 1, started: 1, name: "Safari", cpu: 0.4, memory: 300 << 20, app: safari),
+            .init(pid: 2, started: 1, name: "com.apple.WebKit.WebContent", cpu: 1.2, memory: 600 << 20, app: safari),
+            .init(pid: 3, started: 1, name: "Notes", cpu: 0.1, memory: 200 << 20, app: notes),
+            .init(pid: 4, started: 1, name: "WindowServer", cpu: 0.2, memory: 2 << 30),
+            .init(pid: 5, started: 1, name: "Long app helper with a particularly long process name", cpu: 0.08, memory: 100 << 20, app: long)
+        ]
+        for index in 6...9 {
+            let app = ProcessApp(bundleURL: URL(fileURLWithPath: "/Applications/Example\(index).app"), name: "Example \(index)")
+            rows.append(.init(pid: Int32(index), started: 1, name: app.name, cpu: 0.01, memory: 50 << 20, app: app))
+        }
+        return ProcessSample(rows: rows, state: .ready)
     }
 }
