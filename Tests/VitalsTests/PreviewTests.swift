@@ -28,24 +28,36 @@ final class PreviewTests: XCTestCase {
             snapshot.memoryHistory.append(0.66 + value / 10, at: now - Double(seconds), interval: 1)
             snapshot.downloadHistory.append(value * 10_000_000, at: now - Double(seconds), interval: 1)
             snapshot.uploadHistory.append(value * 200_000, at: now - Double(seconds), interval: 1)
+            snapshot.diskReadHistory.append(value * 300_000, at: now - Double(seconds), interval: 1)
+            snapshot.diskWriteHistory.append((1 - value) * 900_000, at: now - Double(seconds), interval: 1)
         }
-        snapshot.attention = [AttentionEvent(kind: .disk, title: "Disk space is low", detail: "28.0 GB available · below 10%", startedAt: now - 60)]
+        snapshot.attention = [AttentionEvent(kind: .disk, title: "Disk space is low", detail: "28.0 GB available · below 10%", startedAt: now - 60),
+                              AttentionEvent(kind: .cpu, title: "CPU use remains high", detail: "82% overall · at or above 70%", startedAt: now - 900, endedAt: now - 480)]
         snapshot.processes = processFixture()
         let engine = MetricsEngine(initialSnapshot: snapshot)
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-        for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
-            let view = NSHostingView(rootView: PopoverView(engine: engine).background(scheme == .dark ? Color(white: 0.12) : Color(white: 0.96)).environment(\.colorScheme, scheme))
-            view.frame = NSRect(x: 0, y: 0, width: 360, height: 700)
-            let window = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
-            window.contentView = view
-            window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
-            view.layoutSubtreeIfNeeded()
-            let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
-            view.cacheDisplay(in: view.bounds, to: bitmap)
-            let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-            try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("popover-\(name).png"))
-            window.contentView = nil
+        for tab in PanelTab.allCases {
+            UserDefaults.standard.set(tab.rawValue, forKey: "panel.tab")
+            for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
+                let view = NSHostingView(rootView: PopoverView(engine: engine, maxHeight: 2000).background(scheme == .dark ? Color(white: 0.12) : Color(white: 0.96)).environment(\.colorScheme, scheme))
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 1400), styleMask: .borderless, backing: .buffered, defer: false)
+                window.contentView = view
+                window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+                // Two passes: the panel measures itself and then takes that height.
+                for _ in 0..<3 {
+                    view.layoutSubtreeIfNeeded()
+                    try await Task.sleep(for: .milliseconds(100))
+                    view.setFrameSize(view.fittingSize)
+                }
+                view.layoutSubtreeIfNeeded()
+                let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("popover-\(tab.rawValue.lowercased())-\(name).png"))
+                window.contentView = nil
+            }
         }
+        UserDefaults.standard.removeObject(forKey: "panel.tab")
     }
 
     /// Focused variants keep the expandable rows visible in offscreen review.

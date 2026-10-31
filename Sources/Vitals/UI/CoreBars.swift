@@ -31,7 +31,7 @@ struct CoreBars: View {
             }
             if let label {
                 Text(label)
-                    .font(.system(size: 9))
+                    .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
         }

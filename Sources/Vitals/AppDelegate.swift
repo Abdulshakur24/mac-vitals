@@ -327,8 +327,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
         }
     }
 
-    private func showContextMenu() {
+    /// One menu for right-clicking the status item and the panel's gear.
+    private func makeMenu() -> NSMenu {
         let menu = NSMenu()
+
+        let monitor = NSMenuItem(
+            title: "Activity Monitor",
+            action: #selector(openActivityMonitor),
+            keyEquivalent: ""
+        )
+        monitor.target = self
+        menu.addItem(monitor)
 
         let reveal = NSMenuItem(
             title: "Edit Configuration…",
@@ -353,10 +362,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
+        return menu
+    }
 
+    private func showContextMenu() {
         // Attaching the menu makes the click that follows open it, then it is
         // detached again so left-click keeps showing the popover instead.
-        statusItem.menu = menu
+        statusItem.menu = makeMenu()
         statusItem.button?.performClick(nil)
         statusItem.menu = nil
     }
@@ -369,7 +381,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
         let url = FileManager.default
             .homeDirectoryForCurrentUser
             .appendingPathComponent(".config/vitals/config.json")
-        NSWorkspace.shared.open(url)
+        // Nothing may be registered for .json on a Mac with no code editor, and
+        // `open` fails silently then. Finder at least shows where the file is.
+        if NSWorkspace.shared.urlForApplication(toOpen: url) != nil {
+            NSWorkspace.shared.open(url)
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+    }
+
+    @objc private func openActivityMonitor() {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.ActivityMonitor") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Opened at the pointer rather than attached to the gear: the panel is
+    /// SwiftUI and `NSMenu` is what the status item already builds.
+    private func showPanelMenu() {
+        makeMenu().popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
     // MARK: - Popover
@@ -422,7 +452,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
 
         // Built fresh on each open and torn down on close, so the detail view
         // costs nothing at all while hidden.
-        let controller = NSHostingController(rootView: PopoverView(engine: engine))
+        let height = button.window?.screen?.visibleFrame.height ?? NSScreen.main?.visibleFrame.height ?? 800
+        let controller = NSHostingController(rootView: PopoverView(
+            engine: engine,
+            maxHeight: min(700, height - 40),
+            showMenu: { [weak self] in self?.showPanelMenu() }
+        ))
         // Without this the popover keeps its default content size and the
         // SwiftUI view overflows it — the top sections get clipped straight
         // off. `.preferredContentSize` makes the controller publish SwiftUI's

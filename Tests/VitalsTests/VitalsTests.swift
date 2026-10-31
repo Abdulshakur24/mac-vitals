@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 import Darwin
 @testable import Vitals
@@ -203,6 +204,21 @@ final class VitalsTests: XCTestCase {
         XCTAssertNil(event.interrupted)
     }
 
+    func testBytesDropTheDecimalOnlyWhereItIsNoise() {
+        XCTAssertEqual(Format.bytes(512), "512 B")
+        XCTAssertEqual(Format.bytes(1536 << 10), "1.5 MB")
+        XCTAssertEqual(Format.bytes(99 << 20), "99.0 MB")
+        XCTAssertEqual(Format.bytes(900 << 20), "900 MB")
+        XCTAssertEqual(Format.bytes(460 << 30), "460 GB")
+    }
+
+    func testChartSummaryOverItsWindow() {
+        let points = [0.2, 0.8, 0.5].enumerated().map { HistoryPoint(time: Double($0), value: $1, startsSegment: false) }
+        XCTAssertEqual(points.peak, 0.8)
+        XCTAssertEqual(points.summary(Format.percent), "peak 80% · avg 50%")
+        XCTAssertEqual([HistoryPoint]().summary(Format.percent), "")
+    }
+
     func testDurationReadsTheWayPeopleSayIt() {
         XCTAssertEqual(Format.duration(45), "45 s")
         XCTAssertEqual(Format.duration(420), "7 min")
@@ -300,6 +316,26 @@ final class MenuBarReadoutTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(readout.blocks.first).sparkline.isEmpty)
         let compact = try XCTUnwrap(MenuBarLayout.ladder(for: [.cpu]).last)
         XCTAssertEqual(MenuBarReadout(layout: compact, snapshot: snapshot(at: 1001), thresholds: .init()).blocks.first?.sparkline, [])
+    }
+
+    func testTemplateBitmapDrawsAtFullSizeAcrossItsWidth() throws {
+        var sample = snapshot(at: 1001)
+        sample.thermal.cpu = 44
+        let readout = MenuBarReadout(layout: layout, snapshot: sample, thresholds: .init())
+        let image = MenuBarRenderer.image(for: readout)
+        XCTAssertTrue(image.isTemplate)
+        let bitmap = try XCTUnwrap(image.representations.first as? NSBitmapImageRep)
+        XCTAssertEqual(bitmap.pixelsWide, Int(readout.width) * 2)
+        // Temperature is the last block. Drawn at 1x it would stop near the middle.
+        let inked = (bitmap.pixelsWide * 3 / 4..<bitmap.pixelsWide).contains { x in
+            (0..<bitmap.pixelsHigh).contains { y in (bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.1 }
+        }
+        XCTAssertTrue(inked)
+    }
+
+    func testAlertsAreDrawnInColour() {
+        let readout = MenuBarReadout(layout: layout, snapshot: snapshot(at: 1001), thresholds: .init(cpu: 0.1))
+        XCTAssertFalse(MenuBarRenderer.image(for: readout).isTemplate)
     }
 
     func testOnlyAlertsAndWidthSkipTheRefreshGap() {

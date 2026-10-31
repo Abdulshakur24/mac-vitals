@@ -211,6 +211,8 @@ enum MenuBarRenderer {
         NSGraphicsContext.saveGraphicsState()
         defer { NSGraphicsContext.restoreGraphicsState() }
         NSGraphicsContext.current = context
+        // The context counts pixels whatever `size` says, so points need scaling.
+        context.cgContext.scaleBy(x: 2, y: 2)
         drawing(readout, size: size, palette: Palette(primary: .black, secondary: .black.withAlphaComponent(0.6)))
             .draw(in: NSRect(origin: .zero, size: size))
         return bitmap

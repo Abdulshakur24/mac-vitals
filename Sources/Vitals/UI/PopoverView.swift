@@ -1,90 +1,191 @@
 import SwiftUI
 
+enum PanelTab: String, CaseIterable, Identifiable {
+    case apps = "Apps", history = "History"
+    var id: Self { self }
+}
+
 /// The detail panel shown when the status item is clicked.
+///
+/// The strip and any warning are always in view; the tabs hold whichever of the
+/// two longer lists is wanted. The panel takes the height of what it is showing
+/// and scrolls only past `maxHeight`.
 struct PopoverView: View {
     @ObservedObject var engine: MetricsEngine
-    @State private var historyWindow: HistoryWindow = .fiveMinutes
+    /// Tallest the panel may be on the display it opened on.
+    var maxHeight: CGFloat = 700
+    /// Opens the same menu as right-clicking the status item.
+    var showMenu: () -> Void = {}
+
+    @AppStorage("panel.tab") private var tab: PanelTab = .apps
+    @AppStorage("panel.historyHour") private var showsHour = false
     @State private var showRecent = false
+    @State private var scrollTarget: HistorySection?
+    @State private var chromeHeight: CGFloat = 200
+    @State private var contentHeight: CGFloat = 320
 
     private var snapshot: Snapshot { engine.snapshot }
+    private var historyWindow: HistoryWindow { showsHour ? .oneHour : .fiveMinutes }
+    private var activeWarnings: [AttentionEvent] { snapshot.attention.filter { $0.endedAt == nil } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            section { historyControls }
-            divider
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    section { attention }
-                    divider
-                    section { TopAppsView(sample: snapshot.processes, selection: .saved()) }
-                    divider
-                    section { cpu }
-                    divider
-                    section { memory }
-                    divider
-                    section { network }
-                    divider
-                    section { disk }
-                    if snapshot.thermal.cpu != nil || snapshot.thermal.state != .nominal {
-                        divider
-                        section { temperature }
-                    }
+            chrome.onGeometryChange(for: CGFloat.self, of: \.size.height) { chromeHeight = $0 }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    tabContent
+                        .onGeometryChange(for: CGFloat.self, of: \.size.height) { contentHeight = $0 }
+                }
+                .frame(height: min(contentHeight, max(160, maxHeight - chromeHeight)))
+                .task(id: scrollTarget) {
+                    guard let scrollTarget else { return }
+                    // The History tab may be appearing in this same update, and
+                    // a section that is not laid out yet cannot be scrolled to.
+                    await Task.yield()
+                    proxy.scrollTo(scrollTarget, anchor: .top)
+                    self.scrollTarget = nil
                 }
             }
-            divider
-            footer
         }
-        .frame(width: 360, height: min(700, max(300, (NSScreen.main?.visibleFrame.height ?? 800) - 100)))
+        .frame(width: 360)
         .font(.system(size: 11).monospacedDigit())
     }
 
-    private var historyControls: some View {
+    private var chrome: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header.padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
+            GlanceStrip(tiles: tiles, end: snapshot.sampledAt, duration: HistoryWindow.fiveMinutes.rawValue) { section in
+                tab = .history
+                scrollTarget = section
+            }
+            .padding(.horizontal, 14)
+            if !activeWarnings.isEmpty { warnings.padding(.horizontal, 14).padding(.top, 8) }
+            Picker("Panel view", selection: $tab) {
+                ForEach(PanelTab.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            divider
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Text("Vitals").font(.system(size: 13, weight: .semibold))
+            if ProcessInfo.processInfo.isLowPowerModeEnabled {
+                Label("Low Power", systemImage: "leaf")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .help("Low Power Mode doubles the sample interval")
+            }
+            Spacer()
+            Button(action: showMenu) {
+                Image(systemName: "gearshape").font(.system(size: 13))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Settings and more")
+            .accessibilityLabel("Vitals menu")
+        }
+    }
+
+    private var tiles: [GlanceTile] {
+        var tiles = [
+            GlanceTile(id: .cpu, title: "CPU", value: Format.percent(snapshot.cpu.total),
+                       isAlert: snapshot.cpu.total >= engine.thresholds.cpu,
+                       sparkline: points(snapshot.cpuHistory, .fiveMinutes), tint: .accentColor),
+            GlanceTile(id: .memory, title: "Memory", value: Format.bytes(snapshot.memory.used),
+                       caption: "of \(Format.bytes(snapshot.memory.total))",
+                       isAlert: snapshot.memory.pressureLevel > 1,
+                       sparkline: points(snapshot.memoryHistory, .fiveMinutes), tint: .purple),
+            GlanceTile(id: .network, title: "Network", value: "↓ \(Format.rate(snapshot.network.download))",
+                       caption: "↑ \(Format.rate(snapshot.network.upload))",
+                       spokenValue: "\(Format.rate(snapshot.network.download)) down, \(Format.rate(snapshot.network.upload)) up"),
+            GlanceTile(id: .disk, title: "Disk", value: Format.bytes(snapshot.disk.free), caption: "free",
+                       isAlert: snapshot.disk.total > 0 && snapshot.disk.freeFraction < engine.thresholds.diskFree),
+        ]
+        if let temperature = snapshot.thermal.cpu {
+            tiles.append(GlanceTile(id: .temperature, title: "Temp", value: Format.celsius(temperature),
+                                    caption: snapshot.thermal.state == .nominal ? "hottest die" : thermalStateLabel,
+                                    isAlert: temperature >= engine.thresholds.temperature || snapshot.thermal.state.rawValue >= ProcessInfo.ThermalState.serious.rawValue,
+                                    spokenValue: "\(Int(temperature.rounded())) degrees"))
+        }
+        return tiles
+    }
+
+    private var warnings: some View {
         VStack(alignment: .leading, spacing: 6) {
+            ForEach(activeWarnings) { event in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(event.title).fontWeight(.semibold)
+                        Text(event.detail).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private var tabContent: some View {
+        switch tab {
+        case .apps:
+            section { TopAppsView(sample: snapshot.processes, selection: .saved()) }
+        case .history:
+            VStack(alignment: .leading, spacing: 0) {
+                section { historyControls }
+                divider
+                section { cpu }.id(HistorySection.cpu)
+                divider
+                section { memory }.id(HistorySection.memory)
+                divider
+                section { network }.id(HistorySection.network)
+                divider
+                section { disk }.id(HistorySection.disk)
+                if snapshot.thermal.cpu != nil || snapshot.thermal.state != .nominal {
+                    divider
+                    section { temperature }.id(HistorySection.temperature)
+                }
+            }
+        }
+    }
+
+    private var historyControls: some View {
+        let recent = snapshot.attention.filter { $0.endedAt != nil }.reversed()
+        return VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("History").fontWeight(.semibold)
-                Spacer()
-                Picker("History window", selection: $historyWindow) {
+                Text("Last").foregroundStyle(.secondary)
+                Picker("History window", selection: $showsHour) {
                     ForEach(HistoryWindow.allCases) { window in
-                        Text(window.label).tag(window)
+                        Text(window.label).tag(window == .oneHour)
                     }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .controlSize(.small)
                 .frame(width: 128)
+                Spacer(minLength: 0)
             }
-            Text("5-second peaks · gaps while asleep or closed")
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var attention: some View {
-        let active = snapshot.attention.filter { $0.endedAt == nil }
-        let recent = snapshot.attention.filter { $0.endedAt != nil }.reversed()
-        return VStack(alignment: .leading, spacing: 8) {
-            Label(active.isEmpty ? "No sustained warnings" : "Needs attention",
-                  systemImage: active.isEmpty ? "checkmark.circle" : "exclamationmark.circle")
-                .fontWeight(.semibold)
-                .foregroundStyle(active.isEmpty ? Color.secondary : Color.orange)
-            ForEach(active) { event in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(event.title)
-                    Text(event.detail).foregroundStyle(.secondary)
-                }
-            }
+            .help("Five-second peaks. Gaps are time asleep or closed.")
             if !recent.isEmpty {
-                DisclosureGroup("Recent events (\(recent.count))", isExpanded: $showRecent) {
+                DisclosureGroup("Recent warnings (\(recent.count))", isExpanded: $showRecent) {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(Array(recent)) { event in
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack {
-                                    Text(event.title)
-                                    Spacer()
-                                    Text(eventSpan(event))
-                                }
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(event.title)
+                                Text(eventSpan(event)).foregroundStyle(.secondary)
                                 Text(event.detail).foregroundStyle(.secondary)
                             }
+                            .accessibilityElement(children: .combine)
                         }
                     }
                     .padding(.top, 6)
@@ -101,27 +202,29 @@ struct PopoverView: View {
         return "\(start)–\(Date(timeIntervalSince1970: end).formatted(clock)) · \(Format.duration(end - event.startedAt))"
     }
 
-    private func points(_ history: MetricHistory) -> [HistoryPoint] {
-        history.points(endingAt: snapshot.sampledAt, duration: historyWindow.rawValue)
+    private func points(_ history: MetricHistory, _ window: HistoryWindow? = nil) -> [HistoryPoint] {
+        history.points(endingAt: snapshot.sampledAt, duration: (window ?? historyWindow).rawValue)
     }
 
-    private func chart(_ history: MetricHistory, name: String, ceiling: Double, color: Color) -> some View {
-        HistoryChart(series: [HistorySeries(name: name, points: points(history), color: color, format: Format.percent)],
-                     end: snapshot.sampledAt, duration: historyWindow.rawValue, ceiling: ceiling)
+    private func chart(_ series: [HistorySeries], ceiling: Double, summary: String) -> some View {
+        HistoryChart(series: series, end: snapshot.sampledAt, duration: historyWindow.rawValue,
+                     ceiling: ceiling, summary: summary)
     }
 
-    private var networkCeiling: Double {
-        max(1, max(points(snapshot.downloadHistory).map(\.value).max() ?? 0,
-                   points(snapshot.uploadHistory).map(\.value).max() ?? 0))
+    /// Scale for a rate chart: the busiest moment in view, whichever series.
+    private func ceiling(_ series: [[HistoryPoint]]) -> Double {
+        max(1, series.compactMap(\.peak).max() ?? 0)
     }
 
     // MARK: - Sections
 
     private var cpu: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let history = points(snapshot.cpuHistory)
+        return VStack(alignment: .leading, spacing: 8) {
             header("CPU", value: Format.percent(snapshot.cpu.total))
 
-            chart(snapshot.cpuHistory, name: "CPU", ceiling: 1, color: .accentColor)
+            chart([HistorySeries(name: "CPU", points: history, color: .accentColor, format: Format.percent)],
+                  ceiling: 1, summary: history.summary(Format.percent))
 
             CoreBars(loads: snapshot.cpu.perCore, layout: engine.coreLayout)
 
@@ -134,13 +237,15 @@ struct PopoverView: View {
     }
 
     private var memory: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let history = points(snapshot.memoryHistory)
+        return VStack(alignment: .leading, spacing: 8) {
             header(
                 "Memory",
                 value: "\(Format.bytes(snapshot.memory.used)) / \(Format.bytes(snapshot.memory.total))"
             )
 
-            chart(snapshot.memoryHistory, name: "RAM", ceiling: 1, color: pressureColor)
+            chart([HistorySeries(name: "RAM", points: history, color: .purple, format: Format.percent)],
+                  ceiling: 1, summary: history.summary(Format.percent))
                 .help("Memory used as a fraction of physical RAM; this graph does not measure memory pressure.")
 
             // Components sum to Used; pressure and swap provide context.
@@ -152,14 +257,16 @@ struct PopoverView: View {
                 }
                 GridRow {
                     legend("Swap", Format.bytes(snapshot.memory.swapUsed))
-                    legend("Pressure", snapshot.memory.pressureLabel, tint: pressureColor)
+                    legend("Pressure", snapshot.memory.pressureLabel,
+                           tint: pressureColor, warns: snapshot.memory.pressureLevel > 1)
                 }
             }
         }
     }
 
     private var network: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let down = points(snapshot.downloadHistory), up = points(snapshot.uploadHistory)
+        return VStack(alignment: .leading, spacing: 8) {
             header(
                 "Network",
                 value: snapshot.network.interface.isEmpty
@@ -167,45 +274,57 @@ struct PopoverView: View {
                     : "\(snapshot.network.interface)  \(snapshot.network.ipAddress ?? "")"
             )
 
-            HistoryChart(series: [
-                HistorySeries(name: "↓ Down", points: points(snapshot.downloadHistory), color: .blue, format: Format.rate),
-                HistorySeries(name: "↑ Up", points: points(snapshot.uploadHistory), color: .green, format: Format.rate)
-            ], end: snapshot.sampledAt, duration: historyWindow.rawValue, ceiling: networkCeiling)
-
-            Text("Scale 0–\(Format.rate(networkCeiling)) · all active interfaces")
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
+            chart([
+                HistorySeries(name: "↓ Down", points: down, color: .blue, format: Format.rate),
+                HistorySeries(name: "↑ Up", points: up, color: .green, format: Format.rate),
+            ], ceiling: ceiling([down, up]), summary: "↓ \(down.summary(Format.rate))")
+                .help("All active interfaces. The scale follows the busiest moment in view.")
 
             HStack(spacing: 14) {
                 legend("↓ Down", Format.rate(snapshot.network.download), tint: .blue)
                 legend("↑ Up", Format.rate(snapshot.network.upload), tint: .green)
-                legend("Session", "\(Format.bytes(snapshot.network.sessionReceived)) in")
             }
+
+            Text("↓ \(Format.bytes(snapshot.network.sessionReceived)) ↑ \(Format.bytes(snapshot.network.sessionSent)) since launch")
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(.secondary)
         }
     }
 
     private var disk: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let read = points(snapshot.diskReadHistory), write = points(snapshot.diskWriteHistory)
+        let isLow = snapshot.disk.total > 0 && snapshot.disk.freeFraction < engine.thresholds.diskFree
+        return VStack(alignment: .leading, spacing: 8) {
             header(
                 "Disk",
-                value: "\(Format.bytes(snapshot.disk.free)) free of \(Format.bytes(snapshot.disk.total))"
+                value: "\(Format.bytes(snapshot.disk.free)) free of \(Format.bytes(snapshot.disk.total))",
+                warns: isLow
             )
 
-            // Capacity bar. Unlike the other metrics this one is a level, not
-            // a rate, so a sparkline of it would be a flat line all day.
+            // Capacity bar. Unlike activity, capacity is a level rather than a
+            // rate, so a chart of it would be a flat line all day.
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.primary.opacity(0.1))
                     Capsule()
-                        .fill(snapshot.disk.freeFraction < engine.thresholds.diskFree ? Color.orange : Color.accentColor)
+                        .fill(isLow ? Color.orange : Color.accentColor)
                         .frame(width: geometry.size.width * snapshot.disk.usedFraction)
                 }
             }
             .frame(height: 6)
+            .accessibilityElement()
+            .accessibilityLabel("Disk used")
+            .accessibilityValue(Format.percent(snapshot.disk.usedFraction))
+
+            chart([
+                HistorySeries(name: "Read", points: read, color: .blue, format: Format.rate),
+                HistorySeries(name: "Write", points: write, color: .pink, format: Format.rate),
+            ], ceiling: ceiling([read, write]), summary: "Write \(write.summary(Format.rate))")
+                .help("All internal and external disks. The scale follows the busiest moment in view.")
 
             HStack(spacing: 14) {
-                legend("Read", Format.rate(snapshot.disk.read))
-                legend("Write", Format.rate(snapshot.disk.write))
+                legend("Read", Format.rate(snapshot.disk.read), tint: .blue)
+                legend("Write", Format.rate(snapshot.disk.write), tint: .pink)
                 legend("Used", Format.percent(snapshot.disk.usedFraction))
             }
         }
@@ -232,31 +351,10 @@ struct PopoverView: View {
                     legend("Battery", Format.celsius(battery))
                 }
                 if snapshot.thermal.state != .nominal {
-                    legend("State", thermalStateLabel, tint: .orange)
+                    legend("State", thermalStateLabel, tint: .orange, warns: true)
                 }
             }
         }
-    }
-
-    private var footer: some View {
-        HStack {
-            Text(rateLabel)
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-            Spacer()
-            Button("Activity Monitor") {
-                if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.ActivityMonitor") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            Button("Quit") { NSApplication.shared.terminate(nil) }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
     }
 
     // MARK: - Building blocks
@@ -265,43 +363,47 @@ struct PopoverView: View {
         content()
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var divider: some View {
         Divider().opacity(0.5)
     }
 
-    private func header(_ title: String, value: String) -> some View {
-        HStack {
+    private func header(_ title: String, value: String, warns: Bool = false) -> some View {
+        HStack(spacing: 4) {
             Text(title).font(.system(size: 11, weight: .semibold))
+            if warns {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("Warning")
+            }
             Spacer()
             Text(value).foregroundStyle(.secondary).lineLimit(1)
         }
     }
 
-    private func legend(_ title: String, _ value: String, tint: Color = .primary) -> some View {
+    private func legend(_ title: String, _ value: String, tint: Color = .primary, warns: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(title).font(.system(size: 9)).foregroundStyle(.secondary)
-            Text(value).foregroundStyle(tint)
+            Text(title).font(.system(size: 10)).foregroundStyle(.secondary)
+            HStack(spacing: 3) {
+                if warns {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .accessibilityLabel("Warning")
+                }
+                Text(value)
+            }
+            .foregroundStyle(tint)
         }
-    }
-
-    /// Shows the sampling rate, and says so when Low Power Mode is the reason
-    /// it is slower than configured — otherwise the halved rate looks like a
-    /// bug rather than the intended behaviour.
-    private var rateLabel: String {
-        let interval = engine.effectiveInterval
-        let rate = String(format: interval < 1 ? "%.1fs" : "%.0fs", interval)
-        return ProcessInfo.processInfo.isLowPowerModeEnabled
-            ? "Vitals · \(rate) · low power"
-            : "Vitals · \(rate)"
     }
 
     private var pressureColor: Color {
         switch snapshot.memory.pressureLevel {
         case 4...: .red
         case 2...: .orange
-        default: .purple
+        default: .primary
         }
     }
 

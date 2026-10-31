@@ -7,7 +7,8 @@ import Foundation
 /// one tick and "10.12 MB/s" the next makes the whole right side of the menu
 /// bar shuffle sideways.
 enum Format {
-    /// Bytes as a size, e.g. "1.4 GB". Always 1 decimal above KB.
+    /// Bytes as a size, e.g. "1.4 GB". One decimal below 100, where it carries
+    /// information, and none at or above, where it is noise: "900 MB".
     static func bytes(_ value: UInt64) -> String {
         let units = ["B", "KB", "MB", "GB", "TB"]
         var amount = Double(value)
@@ -17,6 +18,7 @@ enum Format {
             unit += 1
         }
         if unit == 0 { return "\(Int(amount)) B" }
+        if amount >= 99.95 { return String(format: "%.0f %@", amount, units[unit]) }
         return String(format: "%.1f %@", amount, units[unit])
     }
 
