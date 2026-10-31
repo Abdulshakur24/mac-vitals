@@ -5,6 +5,7 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
     private let engine = MetricsEngine(historyStore: HistoryStore())
     private let configStore = ConfigStore()
+    private let panelState = PanelState()
 
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
@@ -331,6 +332,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
     private func makeMenu() -> NSMenu {
         let menu = NSMenu()
 
+        let settings = NSMenuItem(
+            title: "Settings…",
+            action: #selector(openSettings),
+            keyEquivalent: ""
+        )
+        settings.target = self
+        menu.addItem(settings)
+        menu.addItem(.separator())
+
         let monitor = NSMenuItem(
             title: "Activity Monitor",
             action: #selector(openActivityMonitor),
@@ -377,10 +387,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
         LoginItem.setEnabled(!LoginItem.isEnabled)
     }
 
+    @objc private func openSettings() {
+        panelState.showsSettings = true
+        if !popover.isShown { togglePopover() }
+    }
+
     @objc private func revealConfig() {
-        let url = FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/vitals/config.json")
+        let url = configStore.url
         // Nothing may be registered for .json on a Mac with no code editor, and
         // `open` fails silently then. Finder at least shows where the file is.
         if NSWorkspace.shared.urlForApplication(toOpen: url) != nil {
@@ -436,6 +449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
             // running on every tick with nothing visible, which is most of
             // this app's idle cost.
             popover.contentViewController = nil
+            panelState.showsSettings = false
             statusItem.button?.highlight(false)
         }
     }
@@ -455,8 +469,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
         let height = button.window?.screen?.visibleFrame.height ?? NSScreen.main?.visibleFrame.height ?? 800
         let controller = NSHostingController(rootView: PopoverView(
             engine: engine,
+            config: configStore,
+            panel: panelState,
             maxHeight: min(700, height - 40),
-            showMenu: { [weak self] in self?.showPanelMenu() }
+            showMenu: { [weak self] in self?.showPanelMenu() },
+            editConfig: { [weak self] in self?.revealConfig() }
         ))
         // Without this the popover keeps its default content size and the
         // SwiftUI view overflows it — the top sections get clipped straight

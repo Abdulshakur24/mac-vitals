@@ -9,6 +9,7 @@ enum Probe {
         let network = NetworkSampler()
         let disk = DiskSampler()
         let thermal = ThermalSampler()
+        let battery = BatterySampler()
         let processes = ProcessSampler()
 
         print("thermal sensors available: \(thermal.isAvailable)")
@@ -87,6 +88,17 @@ enum Probe {
                 disk   read \(Format.rate(sample.read))  write \(Format.rate(sample.write))  \
                 free \(Format.bytes(sample.free)) / \(Format.bytes(sample.total))
                 """)
+            }
+
+            if let sample = battery.sample() {
+                print("""
+                batt   \(sample.percent)% \(sample.state)  \
+                \(sample.minutesRemaining.map { Format.duration(Double($0) * 60) } ?? "no estimate")  \
+                \(sample.watts.map { String(format: "%.1f W", $0) } ?? "- W")  \
+                \(sample.cycleCount.map { "\($0) cycles" } ?? "")
+                """)
+            } else {
+                print("batt   none")
             }
 
             if round == 3 {

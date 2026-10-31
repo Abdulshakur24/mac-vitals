@@ -1,8 +1,10 @@
 import Foundation
 import OSLog
 
-/// Only chart buckets and warning events are persisted. Live readings,
-/// process identities, and session transfer totals always start fresh.
+/// Only chart buckets and warning events are persisted. Live readings, the
+/// process list, and session transfer totals always start fresh. The one name a
+/// warning can carry is the app it blamed, and this file is readable only by
+/// its owner.
 struct HistoryArchive: Codable {
     var version = 1
     var savedAt: TimeInterval

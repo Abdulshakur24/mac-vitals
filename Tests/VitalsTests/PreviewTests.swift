@@ -21,6 +21,10 @@ final class PreviewTests: XCTestCase {
         snapshot.network = NetworkSample(download: 2_000_000, upload: 40_000, sessionReceived: 800 << 20, interface: "en0", ipAddress: "192.0.2.1")
         snapshot.disk = DiskSample(read: 20_000, write: 500_000, free: 28 << 30, total: 460 << 30)
         snapshot.thermal = ThermalSample(cpu: 44, cpuAverage: 39, ssd: 31, battery: 27)
+        snapshot.battery = BatterySample(description: ["Type": "InternalBattery", "Current Capacity": 38, "Max Capacity": 100,
+                                                       "Power Source State": "Battery Power", "Time to Empty": 100],
+                                         registry: ["CycleCount": NSNumber(value: 340),
+                                                    "PowerTelemetryData": ["SystemLoad": NSNumber(value: 13146)]])
         for seconds in stride(from: 300, through: 0, by: -1) {
             if (100...130).contains(seconds) { continue }
             let value = 0.2 + 0.12 * sin(Double(seconds) / 14)
@@ -32,14 +36,18 @@ final class PreviewTests: XCTestCase {
             snapshot.diskWriteHistory.append((1 - value) * 900_000, at: now - Double(seconds), interval: 1)
         }
         snapshot.attention = [AttentionEvent(kind: .disk, title: "Disk space is low", detail: "28.0 GB available · below 10%", startedAt: now - 60),
-                              AttentionEvent(kind: .cpu, title: "CPU use remains high", detail: "82% overall · at or above 70%", startedAt: now - 900, endedAt: now - 480)]
+                              AttentionEvent(kind: .cpu, title: "CPU use remains high", detail: "82% overall · at or above 70%", startedAt: now - 30, culprit: "Xcode 180%"),
+                              AttentionEvent(kind: .memory, title: "Memory pressure is elevated", detail: "1.2 GB swap in use", startedAt: now - 900, endedAt: now - 480, culprit: "Safari 4.0 GB")]
         snapshot.processes = processFixture()
         let engine = MetricsEngine(initialSnapshot: snapshot)
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-        for tab in PanelTab.allCases {
-            UserDefaults.standard.set(tab.rawValue, forKey: "panel.tab")
+        let store = ConfigStore(directory: URL(fileURLWithPath: directory).appendingPathComponent("config-\(UUID())"))
+        let panel = PanelState()
+        for tab in PanelTab.allCases + [nil] {
+            UserDefaults.standard.set(tab?.rawValue, forKey: "panel.tab")
+            panel.showsSettings = tab == nil
             for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
-                let view = NSHostingView(rootView: PopoverView(engine: engine, maxHeight: 2000).background(scheme == .dark ? Color(white: 0.12) : Color(white: 0.96)).environment(\.colorScheme, scheme))
+                let view = NSHostingView(rootView: PopoverView(engine: engine, config: store, panel: panel, maxHeight: 2000).background(scheme == .dark ? Color(white: 0.12) : Color(white: 0.96)).environment(\.colorScheme, scheme))
                 let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 1400), styleMask: .borderless, backing: .buffered, defer: false)
                 window.contentView = view
                 window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
@@ -53,7 +61,7 @@ final class PreviewTests: XCTestCase {
                 let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
                 view.cacheDisplay(in: view.bounds, to: bitmap)
                 let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("popover-\(tab.rawValue.lowercased())-\(name).png"))
+                try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("popover-\(tab?.rawValue.lowercased() ?? "settings")-\(name).png"))
                 window.contentView = nil
             }
         }

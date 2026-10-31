@@ -6,6 +6,7 @@ enum Metric: String, Hashable, CaseIterable, Codable {
     case network
     case disk
     case temperature
+    case battery
 
     /// How much of a metric is drawn.
     ///
@@ -30,6 +31,8 @@ enum Metric: String, Hashable, CaseIterable, Codable {
         case (.disk, .full): 34        // "100%"
         case (.disk, .compact): 30     // "100%", tighter
         case (.temperature, _): 26     // "100°" is already minimal
+        case (.battery, .full): 40     // "⚡100%"
+        case (.battery, .compact): 30  // "100%"
         }
     }
 }

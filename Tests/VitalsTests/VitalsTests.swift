@@ -383,3 +383,213 @@ final class CoreLayoutTests: XCTestCase {
         XCTAssertTrue(Set(kinds.values).isSubset(of: ["P", "E"]))
     }
 }
+
+final class BatteryTests: XCTestCase {
+    private let discharging: [String: Any] = [
+        "Type": "InternalBattery", "Is Present": true, "Current Capacity": 23, "Max Capacity": 100,
+        "Power Source State": "Battery Power", "Is Charging": false, "Time to Empty": 79, "Time to Full Charge": 0,
+    ]
+
+    func testReadsChargeAndTimeWhileDischarging() throws {
+        let sample = try XCTUnwrap(BatterySample(description: discharging, registry: nil))
+        XCTAssertEqual(sample.percent, 23)
+        XCTAssertEqual(sample.state, .discharging)
+        XCTAssertEqual(sample.minutesRemaining, 79)
+        XCTAssertNil(sample.watts)
+    }
+
+    func testAccessoriesAreNotThisMacsBattery() {
+        var hearingAid = discharging
+        hearingAid["Type"] = "Accessory Source"
+        XCTAssertNil(BatterySample(description: hearingAid, registry: nil))
+        XCTAssertNil(BatterySample(description: [:], registry: nil))
+    }
+
+    func testEstimatingShowsNoTime() throws {
+        var estimating = discharging
+        estimating["Time to Empty"] = -1
+        XCTAssertNil(try XCTUnwrap(BatterySample(description: estimating, registry: nil)).minutesRemaining)
+    }
+
+    func testPowerStates() throws {
+        var power = discharging
+        power["Power Source State"] = "AC Power"
+        XCTAssertEqual(try XCTUnwrap(BatterySample(description: power, registry: nil)).state, .pluggedIn)
+        power["Is Charged"] = true
+        XCTAssertEqual(try XCTUnwrap(BatterySample(description: power, registry: nil)).state, .charged)
+        power["Is Charged"] = false
+        power["Is Charging"] = true
+        power["Time to Full Charge"] = 45
+        let charging = try XCTUnwrap(BatterySample(description: power, registry: nil))
+        XCTAssertEqual(charging.state, .charging)
+        XCTAssertEqual(charging.minutesRemaining, 45)
+    }
+
+    func testNegativeAmperageArrivingAsA64BitPattern() throws {
+        // This is what ioreg shows for a 1081 mA discharge at 11.309 V.
+        let registry: [String: Any] = ["Voltage": NSNumber(value: 11309),
+                                       "Amperage": NSNumber(value: UInt64(18446744073709550535)),
+                                       "CycleCount": NSNumber(value: 340)]
+        let sample = try XCTUnwrap(BatterySample(description: discharging, registry: registry))
+        XCTAssertEqual(try XCTUnwrap(sample.watts), 12.2, accuracy: 0.1)
+        XCTAssertEqual(sample.cycleCount, 340)
+    }
+
+    func testSystemLoadIsPreferredOverTheBatterySideOfIt() throws {
+        let registry: [String: Any] = ["Voltage": NSNumber(value: 11309), "Amperage": NSNumber(value: -1081),
+                                       "PowerTelemetryData": ["SystemLoad": NSNumber(value: 13146)]]
+        let sample = try XCTUnwrap(BatterySample(description: discharging, registry: registry))
+        XCTAssertEqual(try XCTUnwrap(sample.watts), 13.146, accuracy: 0.001)
+    }
+
+    func testMenuBarDrawsNothingWithoutABattery() {
+        let layout = MenuBarLayout.ladder(for: [.battery])[0]
+        var snapshot = Snapshot()
+        XCTAssertEqual(MenuBarReadout(layout: layout, snapshot: snapshot, thresholds: .init()).blocks.first?.rows, [])
+        snapshot.battery = BatterySample(description: discharging, registry: nil)
+        let rows = MenuBarReadout(layout: layout, snapshot: snapshot, thresholds: .init()).blocks.first?.rows
+        XCTAssertEqual(rows?.first?.value, "23%")
+    }
+
+    func testThisMacsLiveReadingAgreesWithItself() {
+        guard let sample = BatterySampler().sample() else { return } // desktops have none
+        XCTAssertTrue((0...100).contains(sample.percent))
+    }
+}
+
+final class CulpritTests: XCTestCase {
+    private func app(_ name: String, pid: Int32, cpu: Double, memory: UInt64) -> ProcessInfoRow {
+        ProcessInfoRow(pid: pid, started: 1, name: name, cpu: cpu, memory: memory,
+                       app: ProcessApp(bundleURL: URL(fileURLWithPath: "/Applications/\(name).app"), name: name))
+    }
+
+    func testNamesTheBiggestUserOfEachResource() {
+        let sample = ProcessSample(rows: [app("Xcode", pid: 2, cpu: 1.8, memory: 1 << 30),
+                                          app("Safari", pid: 3, cpu: 0.4, memory: 4 << 30)], state: .ready)
+        XCTAssertEqual(sample.culprit(for: .cpu), "Xcode 180%")
+        XCTAssertEqual(sample.culprit(for: .memory), "Safari 4.0 GB")
+    }
+
+    func testCommandLineToolsCount() {
+        let sample = ProcessSample(rows: [ProcessInfoRow(pid: 9, started: 1, name: "yes", cpu: 2, memory: 1)], state: .ready)
+        XCTAssertEqual(sample.culprit(for: .cpu), "yes 200%")
+    }
+
+    func testDoesNotBlameABystander() {
+        let quiet = ProcessSample(rows: [app("Notes", pid: 2, cpu: 0.03, memory: 1)], state: .ready)
+        XCTAssertNil(quiet.culprit(for: .cpu))
+        XCTAssertNil(ProcessSample().culprit(for: .cpu))
+        XCTAssertNil(ProcessSample(rows: [app("Notes", pid: 2, cpu: 1, memory: 1)], state: .ready).culprit(for: .disk))
+    }
+
+    func testTrackerReportsDwellThenRaiseAndKeepsTheCulprit() {
+        var tracker = AttentionTracker()
+        var snapshot = Snapshot()
+        snapshot.cpu = CPUSample(total: 0.9, perCore: [0.9])
+        XCTAssertEqual(tracker.update(snapshot: snapshot, thresholds: .init(), at: 100),
+                       AttentionChange(dwellStarted: [.cpu]))
+        XCTAssertEqual(tracker.update(snapshot: snapshot, thresholds: .init(), at: 105), AttentionChange())
+        XCTAssertEqual(tracker.update(snapshot: snapshot, thresholds: .init(), at: 115),
+                       AttentionChange(raised: [.cpu]))
+        tracker.setCulprit("Xcode 180%", for: .cpu)
+        XCTAssertEqual(tracker.update(snapshot: snapshot, thresholds: .init(), at: 116), AttentionChange())
+        XCTAssertEqual(tracker.events.first?.culprit, "Xcode 180%")
+    }
+
+    func testEngineDoesNotScanWhileNothingIsWrong() {
+        final class Counter: @unchecked Sendable { var reads = 0 }
+        let counter = Counter()
+        var clock = 0.0
+        let sampler = ProcessSampler(read: {
+            counter.reads += 1
+            return [.init(pid: 7, started: 1, cpuTime: UInt64(counter.reads) * 1_000_000_000, memory: 1)]
+        }, clock: { clock += 15; return clock }, ticksToNanoseconds: 1,
+           metadata: { _ in .init(name: "busy", app: nil) })
+        let engine = MetricsEngine(processSampler: sampler)
+        engine.isTemperatureShown = { false }
+        // Whatever else this machine is doing, no warning can start.
+        var config = Config()
+        config.thresholds.cpu = 1
+        engine.configure(config)
+        engine.start()
+        engine.start()
+        XCTAssertEqual(counter.reads, 0)
+    }
+}
+
+final class ConfigStoreTests: XCTestCase {
+    private func directory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("VitalsConfigTests-\(UUID())")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    func testSaveRoundTripsAndDoesNotReportItselfAsAChange() throws {
+        let folder = try directory()
+        let store = ConfigStore(directory: folder)
+        var changes = 0
+        store.onChange = { _ in changes += 1 }
+        var config = store.config
+        config.menuBar = [.memory, .battery]
+        config.sampleInterval = 2
+        config.thresholds.cpu = 0.5
+        XCTAssertTrue(store.save(config))
+        XCTAssertEqual(store.config, config)
+        XCTAssertEqual(changes, 1)
+        XCTAssertEqual(ConfigStore(directory: folder).config, config)
+    }
+
+    func testSaveValidatesWhatItWrites() throws {
+        let store = ConfigStore(directory: try directory())
+        var config = store.config
+        config.sampleInterval = 0.01
+        XCTAssertTrue(store.save(config))
+        XCTAssertEqual(store.config.sampleInterval, 0.5)
+    }
+
+    func testInvalidFileIsReportedAndNeverOverwritten() throws {
+        let folder = try directory()
+        let file = folder.appendingPathComponent("config.json")
+        let broken = Data(#"{"menuBar": ["cpu",}"#.utf8)
+        try broken.write(to: file)
+        let store = ConfigStore(directory: folder)
+        XCTAssertNotNil(store.problem)
+        XCTAssertFalse(store.canSave)
+        XCTAssertEqual(store.config, .default)
+        XCTAssertFalse(store.save(.default))
+        XCTAssertEqual(try Data(contentsOf: file), broken)
+    }
+
+    func testWrongTypeNamesTheKey() throws {
+        let folder = try directory()
+        try Data(#"{"sampleInterval":"fast"}"#.utf8).write(to: folder.appendingPathComponent("config.json"))
+        XCTAssertTrue(try XCTUnwrap(ConfigStore(directory: folder).problem).contains("sampleInterval"))
+    }
+
+    func testUnknownMetricIsMentionedButStillLoadsAndSaves() throws {
+        let folder = try directory()
+        try Data(#"{"menuBar":["cpu","gpu"]}"#.utf8).write(to: folder.appendingPathComponent("config.json"))
+        let store = ConfigStore(directory: folder)
+        XCTAssertEqual(store.config.menuBar, [.cpu])
+        XCTAssertTrue(try XCTUnwrap(store.problem).contains("gpu"))
+        XCTAssertTrue(store.canSave)
+        // Saving rewrites the list, so the notice has nothing left to report.
+        XCTAssertTrue(store.save(store.config))
+        XCTAssertNil(store.problem)
+    }
+
+    func testMetricListEditing() {
+        var config = Config()
+        config.menuBar = [.cpu, .memory]
+        XCTAssertEqual(config.togglingMetric(.disk).menuBar, [.cpu, .memory, .disk])
+        XCTAssertEqual(config.togglingMetric(.cpu).menuBar, [.memory])
+        // The last metric stays: an empty menu bar has no way back.
+        config.menuBar = [.cpu]
+        XCTAssertEqual(config.togglingMetric(.cpu).menuBar, [.cpu])
+        config.menuBar = [.cpu, .memory, .network]
+        XCTAssertEqual(config.movingMetric(.network, by: -1).menuBar, [.cpu, .network, .memory])
+        XCTAssertEqual(config.movingMetric(.cpu, by: -1).menuBar, [.cpu, .memory, .network])
+        XCTAssertEqual(config.movingMetric(.network, by: 1).menuBar, [.cpu, .memory, .network])
+    }
+}

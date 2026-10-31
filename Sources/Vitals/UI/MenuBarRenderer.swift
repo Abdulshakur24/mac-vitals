@@ -95,6 +95,15 @@ struct MenuBarReadout: Equatable {
             return Block(metric: .temperature, style: style,
                          rows: [Row(value: Format.celsius(temperature))],
                          isAlert: temperature >= thresholds.temperature)
+
+        case .battery:
+            guard let battery = snapshot.battery else {
+                return Block(metric: .battery, style: style, rows: [])
+            }
+            let charging = style == .full && battery.state == .charging
+            return Block(metric: .battery, style: style,
+                         rows: [Row(value: (charging ? "⚡" : "") + Format.percent(Double(battery.percent) / 100))],
+                         isAlert: battery.isLow)
         }
     }
 
@@ -136,6 +145,7 @@ extension Snapshot {
             "Disk \(Format.bytes(disk.free)) free",
         ]
         if let temperature = thermal.cpu { parts.append("Temperature \(Format.celsius(temperature))") }
+        if let battery { parts.append("Battery \(battery.percent)%") }
         let warnings = attention.filter { $0.endedAt == nil }.map(\.title)
         return (parts + warnings).joined(separator: ", ")
     }

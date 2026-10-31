@@ -1,11 +1,12 @@
+import Combine
 import Foundation
 
 /// User settings.
 ///
-/// There is deliberately no preferences window. Settings sprawl is the main
-/// thing that makes general-purpose monitors tiresome, and this app has
-/// exactly one user. A small JSON file that reloads on save does the same job
-/// without a UI to build, lay out, validate or maintain.
+/// The JSON file is the source of truth and reloads on save. The settings pane
+/// in the panel edits that same file, so there is one place settings live, and
+/// the list here stays short on purpose: sprawl is the main thing that makes
+/// general-purpose monitors tiresome.
 struct Config: Codable, Equatable {
     /// Seconds between samples. Automatically doubled while the machine is in
     /// Low Power Mode.
@@ -66,6 +67,35 @@ struct Config: Codable, Equatable {
 
     init() {}
 
+    /// Metric names in a config file that this build does not know.
+    static func unknownMetrics(in data: Data) -> [String] {
+        struct Names: Decodable { var menuBar: [String]? }
+        guard let names = try? JSONDecoder().decode(Names.self, from: data).menuBar else { return [] }
+        return names.filter { Metric(rawValue: $0) == nil }
+    }
+
+    /// Adds a metric at the end, the lowest priority, or removes it. The last
+    /// one stays, because an empty menu bar leaves no way back to the settings.
+    func togglingMetric(_ metric: Metric) -> Config {
+        var result = self
+        if let index = menuBar.firstIndex(of: metric) {
+            if menuBar.count > 1 { result.menuBar.remove(at: index) }
+        } else {
+            result.menuBar.append(metric)
+        }
+        return result
+    }
+
+    /// Moves a metric along the list, which changes both where it is drawn and
+    /// how long it survives when the menu bar is short of room.
+    func movingMetric(_ metric: Metric, by offset: Int) -> Config {
+        guard let index = menuBar.firstIndex(of: metric),
+              menuBar.indices.contains(index + offset) else { return self }
+        var result = self
+        result.menuBar.swapAt(index, index + offset)
+        return result
+    }
+
     /// Applies bounds that keep a hand-edited file from producing a broken or
     /// battery-hostile app: a 0.05s interval would spin the CPU, and an empty
     /// metric list would leave an invisible status item with no way back.
@@ -101,9 +131,15 @@ struct Config: Codable, Equatable {
 /// So the file watch handles content changes and rebinds itself whenever the
 /// inode is replaced, and the directory watch covers the file being created or
 /// swapped in while no file watch is active.
-final class ConfigStore {
-    private(set) var config: Config
-    private let url: URL
+final class ConfigStore: ObservableObject {
+    @Published private(set) var config: Config
+    /// What is wrong with the file on disk, in words, or nil if nothing is.
+    /// A mistake used to mean nothing happened and nothing said why.
+    @Published private(set) var problem: String?
+    /// False while the file cannot be parsed. Saving would replace it, and a
+    /// half-finished hand edit is not this app's to throw away.
+    @Published private(set) var canSave = true
+    let url: URL
     private let directory: URL
     private var fileSource: DispatchSourceFileSystemObject?
     private var directorySource: DispatchSourceFileSystemObject?
@@ -111,13 +147,19 @@ final class ConfigStore {
     /// Called on the main queue whenever the file changes materially.
     var onChange: ((Config) -> Void)?
 
-    init() {
-        directory = FileManager.default
-            .homeDirectoryForCurrentUser
+    static var defaultDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".config/vitals", isDirectory: true)
+    }
+
+    init(directory: URL = ConfigStore.defaultDirectory) {
+        self.directory = directory
         url = directory.appendingPathComponent("config.json")
 
-        config = Self.read(from: url) ?? .default
+        let loaded = Self.load(from: url)
+        config = loaded.config ?? .default
+        problem = loaded.problem
+        canSave = !loaded.isInvalid
         Self.writeDefaultIfMissing(at: url, directory: directory)
 
         watchDirectory()
@@ -131,13 +173,62 @@ final class ConfigStore {
 
     // MARK: - Reading and writing
 
-    private static func read(from url: URL) -> Config? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        let decoder = JSONDecoder()
-        // A hand-edited file will have mistakes in it. Falling back to the
-        // last good config beats crashing or showing an empty menu bar.
-        guard let decoded = try? decoder.decode(Config.self, from: data) else { return nil }
-        return decoded.validated()
+    private struct Loaded {
+        var config: Config?
+        var problem: String?
+        var isInvalid = false
+    }
+
+    private static func load(from url: URL) -> Loaded {
+        // A missing file is the first run, or a deletion: nothing to report.
+        guard let data = try? Data(contentsOf: url) else { return Loaded() }
+        do {
+            let decoded = try JSONDecoder().decode(Config.self, from: data).validated()
+            let unknown = Config.unknownMetrics(in: data)
+            let quoted = unknown.map { "“\($0)”" }.joined(separator: ", ")
+            return Loaded(config: decoded, problem: unknown.isEmpty ? nil : "Unknown metric \(quoted) ignored")
+        } catch {
+            // A hand-edited file will have mistakes in it. Falling back to the
+            // last good config beats crashing or showing an empty menu bar.
+            return Loaded(problem: describe(error), isInvalid: true)
+        }
+    }
+
+    private static func describe(_ error: Error) -> String {
+        func path(_ context: DecodingError.Context) -> String {
+            context.codingPath.map(\.stringValue).joined(separator: ".")
+        }
+        switch error as? DecodingError {
+        case .typeMismatch(_, let context), .valueNotFound(_, let context):
+            return "“\(path(context))” has the wrong type"
+        case .dataCorrupted(let context):
+            let underlying = context.underlyingError as NSError?
+            return underlying?.userInfo[NSDebugDescriptionErrorKey] as? String ?? "Not valid JSON"
+        default:
+            return "Not valid JSON"
+        }
+    }
+
+    /// Replaces the file with `new`, or returns false if the file on disk is
+    /// one this must not overwrite.
+    ///
+    /// `config` is updated before the write, so the watcher's reload finds
+    /// nothing new and the change is reported exactly once.
+    @discardableResult
+    func save(_ new: Config) -> Bool {
+        reload()
+        guard canSave else { return false }
+        let validated = new.validated()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(validated), (try? data.write(to: url, options: .atomic)) != nil else {
+            return false
+        }
+        problem = nil
+        guard validated != config else { return true }
+        config = validated
+        onChange?(validated)
+        return true
     }
 
     /// Writes a commented starting point so the file is discoverable — the app
@@ -211,7 +302,10 @@ final class ConfigStore {
     }
 
     private func reload() {
-        guard let updated = Self.read(from: url), updated != config else { return }
+        let loaded = Self.load(from: url)
+        if problem != loaded.problem { problem = loaded.problem }
+        if canSave == loaded.isInvalid { canSave = !loaded.isInvalid }
+        guard let updated = loaded.config, updated != config else { return }
         config = updated
         onChange?(updated)
     }

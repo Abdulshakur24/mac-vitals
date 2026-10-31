@@ -5,6 +5,12 @@ enum PanelTab: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+/// What the app needs to tell a panel it may not have built yet. The gear menu
+/// lives in AppKit, and its Settings item works whether the panel is open or not.
+final class PanelState: ObservableObject {
+    @Published var showsSettings = false
+}
+
 /// The detail panel shown when the status item is clicked.
 ///
 /// The strip and any warning are always in view; the tabs hold whichever of the
@@ -12,10 +18,14 @@ enum PanelTab: String, CaseIterable, Identifiable {
 /// and scrolls only past `maxHeight`.
 struct PopoverView: View {
     @ObservedObject var engine: MetricsEngine
+    @ObservedObject var config: ConfigStore
+    @ObservedObject var panel: PanelState
     /// Tallest the panel may be on the display it opened on.
     var maxHeight: CGFloat = 700
     /// Opens the same menu as right-clicking the status item.
     var showMenu: () -> Void = {}
+    /// Opens the config file for editing.
+    var editConfig: () -> Void = {}
 
     @AppStorage("panel.tab") private var tab: PanelTab = .apps
     @AppStorage("panel.historyHour") private var showsHour = false
@@ -29,6 +39,18 @@ struct PopoverView: View {
     private var activeWarnings: [AttentionEvent] { snapshot.attention.filter { $0.endedAt == nil } }
 
     var body: some View {
+        Group {
+            if panel.showsSettings {
+                SettingsView(store: config, editConfig: editConfig) { panel.showsSettings = false }
+            } else {
+                dashboard
+            }
+        }
+        .frame(width: 360)
+        .font(.system(size: 11).monospacedDigit())
+    }
+
+    private var dashboard: some View {
         VStack(alignment: .leading, spacing: 0) {
             chrome.onGeometryChange(for: CGFloat.self, of: \.size.height) { chromeHeight = $0 }
             ScrollViewReader { proxy in
@@ -47,8 +69,6 @@ struct PopoverView: View {
                 }
             }
         }
-        .frame(width: 360)
-        .font(.system(size: 11).monospacedDigit())
     }
 
     private var chrome: some View {
@@ -60,6 +80,7 @@ struct PopoverView: View {
             }
             .padding(.horizontal, 14)
             if !activeWarnings.isEmpty { warnings.padding(.horizontal, 14).padding(.top, 8) }
+            if let problem = config.problem { configProblem(problem).padding(.horizontal, 14).padding(.top, 8) }
             Picker("Panel view", selection: $tab) {
                 ForEach(PanelTab.allCases) { Text($0.rawValue).tag($0) }
             }
@@ -113,6 +134,10 @@ struct PopoverView: View {
                                     isAlert: temperature >= engine.thresholds.temperature || snapshot.thermal.state.rawValue >= ProcessInfo.ThermalState.serious.rawValue,
                                     spokenValue: "\(Int(temperature.rounded())) degrees"))
         }
+        if let battery = snapshot.battery {
+            tiles.append(GlanceTile(id: .battery, title: "Battery", value: "\(battery.percent)%",
+                                    caption: batteryCaption(battery), isAlert: battery.isLow))
+        }
         return tiles
     }
 
@@ -124,11 +149,27 @@ struct PopoverView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(event.title).fontWeight(.semibold)
                         Text(event.detail).foregroundStyle(.secondary)
+                        if let culprit = event.culprit { Text("Top: \(culprit)").fontWeight(.medium) }
                     }
                     Spacer(minLength: 0)
                 }
                 .accessibilityElement(children: .combine)
             }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func configProblem(_ problem: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("config.json: \(problem)").fontWeight(.semibold)
+                if !config.canSave { Text("Using the last good settings").foregroundStyle(.secondary) }
+            }
+            Spacer(minLength: 0)
+            Button("Open", action: editConfig).controlSize(.small)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -154,6 +195,10 @@ struct PopoverView: View {
                 if snapshot.thermal.cpu != nil || snapshot.thermal.state != .nominal {
                     divider
                     section { temperature }.id(HistorySection.temperature)
+                }
+                if let battery = snapshot.battery {
+                    divider
+                    section { self.battery(battery) }.id(HistorySection.battery)
                 }
             }
         }
@@ -184,6 +229,9 @@ struct PopoverView: View {
                                 Text(event.title)
                                 Text(eventSpan(event)).foregroundStyle(.secondary)
                                 Text(event.detail).foregroundStyle(.secondary)
+                                if let culprit = event.culprit {
+                                    Text("Top: \(culprit)").foregroundStyle(.secondary)
+                                }
                             }
                             .accessibilityElement(children: .combine)
                         }
@@ -355,6 +403,41 @@ struct PopoverView: View {
                 }
             }
         }
+    }
+
+    private func battery(_ battery: BatterySample) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            header("Battery", value: "\(battery.percent)%", warns: battery.isLow)
+
+            HStack(spacing: 14) {
+                legend("State", batteryState(battery))
+                if let minutes = battery.minutesRemaining {
+                    legend(battery.state == .charging ? "Until full" : "Remaining", Format.duration(Double(minutes) * 60))
+                }
+                if let watts = battery.watts {
+                    legend("System", String(format: "%.1f W", watts))
+                }
+                if let cycles = battery.cycleCount {
+                    legend("Cycles", "\(cycles)")
+                }
+            }
+        }
+    }
+
+    private func batteryState(_ battery: BatterySample) -> String {
+        switch battery.state {
+        case .discharging: "On battery"
+        case .charging: "Charging"
+        case .charged: "Charged"
+        case .pluggedIn: "Plugged in"
+        }
+    }
+
+    /// Time when there is an estimate, otherwise whatever is true of the state.
+    private func batteryCaption(_ battery: BatterySample) -> String {
+        guard let minutes = battery.minutesRemaining else { return batteryState(battery) }
+        let time = Format.duration(Double(minutes) * 60)
+        return battery.state == .charging ? "\(time) to full" : "\(time) left"
     }
 
     // MARK: - Building blocks

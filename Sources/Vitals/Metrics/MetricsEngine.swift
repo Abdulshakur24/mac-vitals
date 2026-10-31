@@ -12,6 +12,8 @@ struct Snapshot: Equatable {
     var network = NetworkSample()
     var disk = DiskSample()
     var thermal = ThermalSample()
+    /// nil on a Mac with no internal battery.
+    var battery: BatterySample?
     var processes = ProcessSample()
 
     var cpuHistory = MetricHistory()
@@ -58,6 +60,7 @@ final class MetricsEngine: ObservableObject {
     private let networkSampler = NetworkSampler()
     private let diskSampler = DiskSampler()
     private let thermalSampler = ThermalSampler()
+    private let batterySampler = BatterySampler()
     private let processSampler: ProcessSampler
     private let historyStore: HistoryStore?
 
@@ -72,6 +75,11 @@ final class MetricsEngine: ObservableObject {
     /// well over 2x the CPU.
     private let baseThermalInterval: TimeInterval = 16
     private var lastThermalSample: TimeInterval = 0
+
+    /// Seconds between battery reads. Charge moves slowly, and plugging in or
+    /// unplugging arrives by notification rather than by waiting for this.
+    private let batteryInterval: TimeInterval = 30
+    private var lastBatterySample: TimeInterval = 0
 
     private var timer: Timer?
     private var isSuspended = false
@@ -141,6 +149,11 @@ final class MetricsEngine: ObservableObject {
         self.historyStore = historyStore
         if let restored { attentionTracker.restore(restored.attention) }
         observePowerNotifications()
+        batterySampler.observeChanges { [weak self] in
+            guard let self else { return }
+            snapshot.battery = batterySampler.sample()
+            lastBatterySample = ProcessInfo.processInfo.systemUptime
+        }
     }
 
     func saveHistory() {
@@ -214,6 +227,7 @@ final class MetricsEngine: ObservableObject {
         networkSampler.resetBaseline()
         diskSampler.resetBaseline()
         lastThermalSample = 0
+        lastBatterySample = 0
         start()
     }
 
@@ -285,6 +299,11 @@ final class MetricsEngine: ObservableObject {
             lastThermalSample = now
         }
 
+        if now - lastBatterySample >= batteryInterval {
+            next.battery = batterySampler.sample()
+            lastBatterySample = now
+        }
+
         // Public thermal state remains available without temperature sensors.
         next.thermal.state = ProcessInfo.processInfo.thermalState
         // A failed sample must not sustain a warning using an old reading.
@@ -296,7 +315,8 @@ final class MetricsEngine: ObservableObject {
             next.diskReadHistory.markGap()
             next.diskWriteHistory.markGap()
         }
-        attentionTracker.update(snapshot: evidence, thresholds: thresholds, at: timestamp)
+        let change = attentionTracker.update(snapshot: evidence, thresholds: thresholds, at: timestamp)
+        nameCulprits(for: change, processes: next.processes)
         next.attention = attentionTracker.events
 
         // Walking the process table is the most expensive thing here, so it
@@ -310,5 +330,27 @@ final class MetricsEngine: ObservableObject {
         // here could never find two snapshots alike.
         snapshot = next
         historyStore?.checkpoint(next)
+    }
+
+    /// Records who was responsible when a warning fires.
+    ///
+    /// By the time anyone opens the panel the load has often passed, so this is
+    /// the one thing that cannot wait for them. A CPU reading needs two scans:
+    /// a baseline as the condition begins, and a second when it has lasted, so
+    /// the figure is the average across the whole dwell rather than an instant.
+    /// While the panel is open the process list is already running on its own
+    /// baseline, so that is left alone and its latest reading used instead.
+    private func nameCulprits(for change: AttentionChange, processes: ProcessSample) {
+        let panelOpen = isDetailVisible()
+        if change.dwellStarted.contains(.cpu), !change.raised.contains(.cpu), !panelOpen {
+            processSampler.resetBaseline()
+            _ = processSampler.sample()
+        }
+        let kinds = change.raised.intersection([.cpu, .memory])
+        guard !kinds.isEmpty else { return }
+        let sample = panelOpen ? processes : processSampler.sample()
+        for kind in kinds {
+            attentionTracker.setCulprit(sample.culprit(for: kind), for: kind)
+        }
     }
 }
