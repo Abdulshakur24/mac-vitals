@@ -53,8 +53,6 @@ struct MenuBarLayout: Equatable {
 
     var items: [Item]
 
-    private static let horizontalPadding: CGFloat = 5
-
     /// Tighter once anything is compact: the gaps are ornament too, and at that
     /// point every point is worth having.
     var spacing: CGFloat {
@@ -66,7 +64,7 @@ struct MenuBarLayout: Equatable {
         guard !items.isEmpty else { return 26 }
         let blocks = items.reduce(0) { $0 + $1.metric.width($1.style) }
         let gaps = CGFloat(items.count - 1) * spacing
-        return blocks + gaps + Self.horizontalPadding * 2
+        return blocks + gaps + MenuBarReadout.horizontalPadding * 2
     }
 
     var metrics: [Metric] { items.map(\.metric) }

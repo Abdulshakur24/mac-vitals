@@ -16,7 +16,7 @@ struct PopoverView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     section { attention }
                     divider
-                    section { TopAppsView(sample: snapshot.processes) }
+                    section { TopAppsView(sample: snapshot.processes, selection: .saved()) }
                     divider
                     section { cpu }
                     divider
@@ -81,7 +81,7 @@ struct PopoverView: View {
                                 HStack {
                                     Text(event.title)
                                     Spacer()
-                                    Text(Date(timeIntervalSince1970: event.startedAt), style: .time)
+                                    Text(eventSpan(event))
                                 }
                                 Text(event.detail).foregroundStyle(.secondary)
                             }
@@ -91,6 +91,14 @@ struct PopoverView: View {
                 }
             }
         }
+    }
+
+    /// `14:02–14:09 · 7 min`
+    private func eventSpan(_ event: AttentionEvent) -> String {
+        let end = event.endedAt ?? snapshot.sampledAt
+        let clock = Date.FormatStyle(date: .omitted, time: .shortened)
+        let start = Date(timeIntervalSince1970: event.startedAt).formatted(clock)
+        return "\(start)–\(Date(timeIntervalSince1970: end).formatted(clock)) · \(Format.duration(end - event.startedAt))"
     }
 
     private func points(_ history: MetricHistory) -> [HistoryPoint] {
@@ -115,10 +123,7 @@ struct PopoverView: View {
 
             chart(snapshot.cpuHistory, name: "CPU", ceiling: 1, color: .accentColor)
 
-            CoreBars(
-                loads: snapshot.cpu.perCore,
-                performanceCoreCount: engine.performanceCoreCount
-            )
+            CoreBars(loads: snapshot.cpu.perCore, layout: engine.coreLayout)
 
             HStack(spacing: 14) {
                 legend("User", Format.percent(snapshot.cpu.user))

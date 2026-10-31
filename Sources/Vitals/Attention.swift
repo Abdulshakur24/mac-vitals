@@ -11,6 +11,10 @@ struct AttentionEvent: Equatable, Identifiable, Codable {
     var detail: String
     var startedAt: TimeInterval
     var endedAt: TimeInterval?
+    /// Closed because sampling stopped, not because the condition cleared.
+    /// Optional, like anything added here: a required key would make every
+    /// existing history file fail to decode.
+    var interrupted: Bool?
 }
 
 /// Local warning history. No notifications, process scans, or extra timer.
@@ -27,6 +31,23 @@ struct AttentionTracker {
         pending.removeAll()
         for index in events.indices where events[index].endedAt == nil {
             events[index].endedAt = time
+            events[index].interrupted = true
+        }
+    }
+
+    /// How long a stop in sampling can last and still be the same event.
+    /// Short, so a duration never quietly spans an afternoon of something else.
+    private static let reopenWindow: TimeInterval = 300
+
+    /// The event a returning condition continues, if any.
+    ///
+    /// Without this every display sleep ends a warning and the wake starts it
+    /// again, which fills the list with copies. Low disk space is reopened
+    /// across any gap: it does not clear by itself while the Mac sleeps.
+    private func interruptedEvent(of kind: AttentionKind, at time: TimeInterval) -> Int? {
+        events.lastIndex { event in
+            guard event.kind == kind, event.interrupted == true, let ended = event.endedAt else { return false }
+            return kind == .disk || time - ended <= Self.reopenWindow
         }
     }
 
@@ -57,6 +78,11 @@ struct AttentionTracker {
             if let index = events.firstIndex(where: { $0.kind == kind && $0.endedAt == nil }) {
                 events[index].title = title
                 events[index].detail = detail
+            } else if let index = interruptedEvent(of: kind, at: time) {
+                events[index].title = title
+                events[index].detail = detail
+                events[index].endedAt = nil
+                events[index].interrupted = nil
             } else {
                 events.append(AttentionEvent(kind: kind, title: title, detail: detail, startedAt: pending[kind] ?? time))
             }

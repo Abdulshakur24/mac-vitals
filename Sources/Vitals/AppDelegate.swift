@@ -2,26 +2,36 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// Hosting view that refuses to handle clicks.
-///
-/// An NSHostingView added to a status item button would otherwise eat the
-/// mouse events the button needs to fire its action, leaving an item that
-/// renders correctly but does nothing when clicked.
-private final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-}
-
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
     private let engine = MetricsEngine(historyStore: HistoryStore())
     private let configStore = ConfigStore()
 
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
-    private var hostingView: NSView?
 
     /// What the readout is drawing right now, which is the configured metrics
     /// minus whatever the menu bar has no room for.
-    private let layoutModel = MenuBarLayoutModel()
+    private var layout = MenuBarLayout(items: [])
+
+    /// The latest published sample. `@Published` delivers before the property
+    /// changes, so this is kept from the sink rather than read off the engine.
+    private var latest = Snapshot()
+
+    /// What the status button is showing. Touching the button is what costs,
+    /// so it is only touched when this would change.
+    private var shown: MenuBarReadout?
+
+    /// When the button was last changed, on the `systemUptime` clock.
+    private var lastShown: TimeInterval = 0
+
+    /// Shortest gap between button updates, independent of the sample rate.
+    ///
+    /// Every update makes AppKit snapshot the item for each copy of the menu
+    /// bar, and that is what this app's idle CPU is: measured over a minute at
+    /// a 1s sample rate, 2.8% updating on every change, 1.1% at 2s, 0.8% at 3s.
+    /// Sampling itself is a small fraction of that, so history and the panel
+    /// stay at the full rate and only the menu bar digits are held back.
+    private static let readoutRefresh: TimeInterval = 3
 
     /// Every layout the configured metrics can degrade to, richest first.
     /// Rebuilt on config change only, since the widths in it are fixed.
@@ -127,31 +137,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.action = #selector(statusItemClicked)
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
-        buildStatusItemContent()
+        button.imagePosition = .imageOnly
+        button.setAccessibilityLabel("Vitals")
+
+        // Colours resolve when the image draws, but a button with an unchanged
+        // image has no reason to draw when the menu bar flips light or dark.
+        button.publisher(for: \.effectiveAppearance)
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.shown = nil
+                self?.showReadout()
+            }
+            .store(in: &cancellables)
+
         setMetrics(configStore.config.menuBar)
     }
 
-    /// Installs the readout. Done once: which metrics it draws is published
-    /// through `layoutModel` rather than baked into the view, so the shape can
-    /// change on every tick without tearing down and rebuilding a hosting view.
-    private func buildStatusItemContent() {
+    /// Applies a layout to the status item: the readout and the length change
+    /// together, so the button is never drawn at the wrong width.
+    private func setLayout(_ newLayout: MenuBarLayout) {
+        layout = newLayout
+        statusItem.length = newLayout.width
+        showReadout()
+        // Tooltip regions are fixed rectangles and the button has just resized.
         guard let button = statusItem.button else { return }
+        button.removeAllToolTips()
+        button.addToolTip(NSRect(x: 0, y: 0, width: newLayout.width, height: MenuBarReadout.height),
+                          owner: self, userData: nil)
+    }
 
-        hostingView?.removeFromSuperview()
+    /// Updates the button if, and only if, what it shows has changed.
+    private func showReadout() {
+        guard let button = statusItem.button else { return }
+        let readout = MenuBarReadout(layout: layout, snapshot: latest, thresholds: engine.thresholds)
+        guard readout != shown else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if let shown, !readout.isUrgent(comparedTo: shown),
+           now - lastShown < Self.readoutRefresh { return }
+        lastShown = now
+        shown = readout
+        button.image = MenuBarRenderer.image(for: readout)
+        button.setAccessibilityValue(latest.summary)
+    }
 
-        let hosting = PassthroughHostingView(
-            rootView: MenuBarView(engine: engine, layoutModel: layoutModel)
-        )
-        hosting.translatesAutoresizingMaskIntoConstraints = false
-        button.addSubview(hosting)
-        NSLayoutConstraint.activate([
-            hosting.leadingAnchor.constraint(equalTo: button.leadingAnchor),
-            hosting.trailingAnchor.constraint(equalTo: button.trailingAnchor),
-            hosting.topAnchor.constraint(equalTo: button.topAnchor),
-            hosting.bottomAnchor.constraint(equalTo: button.bottomAnchor),
-        ])
-
-        hostingView = hosting
+    /// Asked for when the tooltip appears, so nothing is built on each sample.
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag,
+              point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+        latest.summary
     }
 
     // MARK: - Fitting the readout to the space there is
@@ -169,8 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setMetrics(_ metrics: [Metric]) {
         ladder = MenuBarLayout.ladder(for: metrics)
         layoutRank = 0
-        layoutModel.layout = ladder[0]
-        statusItem.length = ladder[0].width
+        setLayout(ladder[0])
         // A refusal is about a width, and these are new widths.
         refused = nil
         layoutSettled = false
@@ -236,8 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard rank != layoutRank else { layoutSettled = true; return }
         layoutRank = rank
-        layoutModel.layout = ladder[rank]
-        statusItem.length = ladder[rank].width
+        setLayout(ladder[rank])
         layoutSettled = false
 
         let shape = ladder[rank].items
@@ -264,7 +294,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// app cheap, and re-fitting is not worth a wakeup of its own.
     private func observeMenuBarSpace() {
         engine.$snapshot
-            .sink { [weak self] _ in self?.updateLayout() }
+            .sink { [weak self] snapshot in
+                guard let self else { return }
+                latest = snapshot
+                updateLayout()
+                showReadout()
+            }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(
@@ -352,7 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // to read. Nothing else in the app is expensive enough to be worth
         // gating this way.
         engine.isTemperatureShown = { [weak self] in
-            self?.layoutModel.layout.metrics.contains(.temperature) ?? true
+            self?.layout.metrics.contains(.temperature) ?? true
         }
 
         // `.transient` popovers close on their own when focus moves elsewhere,
@@ -371,6 +406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // running on every tick with nothing visible, which is most of
             // this app's idle cost.
             popover.contentViewController = nil
+            statusItem.button?.highlight(false)
         }
     }
 
@@ -396,5 +432,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
         popover.contentViewController?.view.window?.makeKey()
+        button.highlight(true)
     }
 }

@@ -95,9 +95,17 @@ final class MetricsEngine: ObservableObject {
 
     /// Primes the per-process CPU baseline so the first visible reading is a
     /// real delta rather than a column of zeros. Called when the panel opens.
+    ///
+    /// The real reading normally arrives on the next tick, but at a long sample
+    /// interval that could be a minute away, so this takes one of its own if no
+    /// tick has got there first. A single delayed call, not a second timer.
     func prepareDetailSamplers() {
         processSampler.resetBaseline()
         snapshot.processes = processSampler.sample()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, isDetailVisible(), snapshot.processes.state == .sampling else { return }
+            snapshot.processes = processSampler.sample()
+        }
     }
 
     /// The rate asked for in the config file.
@@ -122,8 +130,7 @@ final class MetricsEngine: ObservableObject {
         isLowPower ? baseThermalInterval * Self.lowPowerFactor : baseThermalInterval
     }
 
-    var performanceCoreCount: Int { cpuSampler.performanceCoreCount }
-    var efficiencyCoreCount: Int { cpuSampler.efficiencyCoreCount }
+    var coreLayout: CoreLayout { cpuSampler.coreLayout }
 
     init(interval: TimeInterval = 1.0, initialSnapshot: Snapshot = Snapshot(),
          processSampler: ProcessSampler = ProcessSampler(), historyStore: HistoryStore? = nil) {

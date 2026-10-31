@@ -41,7 +41,7 @@ Edit `~/.config/vitals/config.json`. Changes apply immediately.
 }
 ```
 
-Add `disk` for disk activity; remove metrics to hide them. Earlier entries get priority when space is limited. Omitted settings use defaults.
+Add `disk` for free disk space as a percentage; remove metrics to hide them. Earlier entries get priority when space is limited. Omitted settings use defaults.
 
 ## Development
 

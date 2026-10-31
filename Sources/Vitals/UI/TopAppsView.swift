@@ -86,6 +86,8 @@ struct TopAppsView: View {
         } message: { request in
             Text(request.confirmationMessage)
         }
+        .onChange(of: selection.sort) { _, _ in selection.frozenOrder = nil; selection.save() }
+        .onChange(of: selection.filter) { _, _ in selection.frozenOrder = nil; selection.save() }
         .onChange(of: liveIDs) { _, _ in
             selection.retainLiveGroups(in: sample)
             guard sample.state == .ready else { return }
@@ -123,6 +125,9 @@ struct TopAppsView: View {
                 ForEach(selection.displayed(in: sample)) { group in
                     groupRow(group)
                 }
+            }
+            .onHover { inside in
+                selection.frozenOrder = inside ? selection.displayed(in: sample).map(\.id) : nil
             }
 
             if ranked.count > 5 {

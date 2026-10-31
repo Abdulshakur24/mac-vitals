@@ -14,7 +14,7 @@ enum Probe {
         print("thermal sensors available: \(thermal.isAvailable)")
         print("low power mode: \(ProcessInfo.processInfo.isLowPowerModeEnabled)")
 
-        print("cores: \(cpu.performanceCoreCount)P + \(cpu.efficiencyCoreCount)E")
+        print("cores: \(cpu.coreLayout.count("P"))P + \(cpu.coreLayout.count("E"))E")
 
         // Prime the delta-based samplers; their first call has no baseline.
         _ = cpu.sample()
@@ -32,10 +32,12 @@ enum Probe {
                     sample.total * 100, sample.user * 100,
                     sample.system * 100, sample.idle * 100
                 ))
-                let cores = sample.perCore
-                    .map { String(format: "%.0f", $0 * 100) }
-                    .joined(separator: " ")
-                print("cores  \(cores)")
+                for group in cpu.coreLayout.groups {
+                    let loads = group.indices.filter(sample.perCore.indices.contains)
+                        .map { String(format: "%.0f", sample.perCore[$0] * 100) }
+                        .joined(separator: " ")
+                    print("cores  \(group.label ?? "?"): \(loads)")
+                }
             }
 
             if let sample = memory.sample() {

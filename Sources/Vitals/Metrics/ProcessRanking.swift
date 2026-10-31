@@ -115,16 +115,47 @@ struct ProcessSample: Equatable {
     }
 }
 
-/// View state is owned by the popover, which is recreated on each open.
+/// View state is owned by the popover, which is recreated on each open. Sort
+/// and filter are the two choices worth keeping across opens.
 struct ProcessListSelection {
     var sort: ProcessSort = .cpu
     var filter: ProcessFilter = .apps
     var showAll = false
     var expanded: Set<ProcessGroup.ID> = []
+    /// Row order held while the pointer is over the list. Ranking live moves a
+    /// row out from under a click aimed at its actions menu, and one of those
+    /// actions is Force Quit. Values keep updating; only the order waits.
+    var frozenOrder: [ProcessGroup.ID]?
+
+    private static let sortKey = "apps.sort"
+    private static let filterKey = "apps.filter"
+
+    static func saved(in defaults: UserDefaults = .standard) -> ProcessListSelection {
+        var selection = ProcessListSelection()
+        selection.sort = defaults.string(forKey: sortKey).flatMap(ProcessSort.init) ?? .cpu
+        selection.filter = defaults.string(forKey: filterKey).flatMap(ProcessFilter.init) ?? .apps
+        return selection
+    }
+
+    func save(to defaults: UserDefaults = .standard) {
+        defaults.set(sort.rawValue, forKey: Self.sortKey)
+        defaults.set(filter.rawValue, forKey: Self.filterKey)
+    }
+
+    /// Everything the current sort and filter select, in display order. Groups
+    /// that appeared since the freeze follow the frozen ones, and exited groups
+    /// simply drop out.
+    func ordered(in sample: ProcessSample) -> [ProcessGroup] {
+        let ranked = sample.ranked(by: sort, filter: filter)
+        guard let frozenOrder else { return ranked }
+        let groups = Dictionary(uniqueKeysWithValues: ranked.map { ($0.id, $0) })
+        let held = Set(frozenOrder)
+        return frozenOrder.compactMap { groups[$0] } + ranked.filter { !held.contains($0.id) }
+    }
 
     func displayed(in sample: ProcessSample) -> [ProcessGroup] {
-        let ranked = sample.ranked(by: sort, filter: filter)
-        return showAll ? ranked : Array(ranked.prefix(5))
+        let groups = ordered(in: sample)
+        return showAll ? groups : Array(groups.prefix(5))
     }
 
     mutating func retainLiveGroups(in sample: ProcessSample) {

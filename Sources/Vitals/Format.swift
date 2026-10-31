@@ -61,6 +61,16 @@ enum Format {
         "\(Int((fraction * 100).rounded()))%"
     }
 
+    /// A span of time at the precision people say it, e.g. "45 s", "7 min" or
+    /// "1 h 12 min".
+    static func duration(_ seconds: TimeInterval) -> String {
+        let whole = Int(max(0, seconds).rounded())
+        if whole < 60 { return "\(whole) s" }
+        let minutes = whole / 60
+        if minutes < 60 { return "\(minutes) min" }
+        return minutes % 60 == 0 ? "\(minutes / 60) h" : "\(minutes / 60) h \(minutes % 60) min"
+    }
+
     /// Degrees with no decimal, e.g. "62°".
     static func celsius(_ value: Double) -> String {
         "\(Int(value.rounded()))°"
