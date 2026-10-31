@@ -176,4 +176,43 @@ final class ProcessRankingTests: XCTestCase {
         engine.start()
         XCTAssertEqual(engine.snapshot.processes.state, .ready)
     }
+
+    private func app(_ name: String, cpu: Double) -> ProcessInfoRow {
+        let bundle = ProcessApp(bundleURL: URL(fileURLWithPath: "/Applications/\(name).app"), name: name)
+        return ProcessInfoRow(pid: Int32(abs(name.hashValue % 30_000) + 2), started: 1, name: name, cpu: cpu, memory: 1, app: bundle)
+    }
+
+    func testFrozenOrderHoldsRowsButKeepsValuesLive() {
+        var selection = ProcessListSelection()
+        let before = ProcessSample(rows: [app("A", cpu: 0.9), app("B", cpu: 0.1)], state: .ready)
+        selection.frozenOrder = selection.displayed(in: before).map(\.id)
+        let after = ProcessSample(rows: [app("A", cpu: 0.1), app("B", cpu: 0.9)], state: .ready)
+        let rows = selection.displayed(in: after)
+        XCTAssertEqual(rows.map(\.name), ["A", "B"])
+        XCTAssertEqual(rows.map(\.cpu), [0.1, 0.9])
+        selection.frozenOrder = nil
+        XCTAssertEqual(selection.displayed(in: after).map(\.name), ["B", "A"])
+    }
+
+    func testFrozenOrderDropsExitedAppsAndAppendsNewOnes() {
+        var selection = ProcessListSelection()
+        let before = ProcessSample(rows: [app("A", cpu: 0.9), app("B", cpu: 0.5)], state: .ready)
+        selection.frozenOrder = selection.displayed(in: before).map(\.id)
+        let after = ProcessSample(rows: [app("B", cpu: 0.5), app("C", cpu: 0.99)], state: .ready)
+        XCTAssertEqual(selection.displayed(in: after).map(\.name), ["B", "C"])
+    }
+
+    func testSortAndFilterSurviveReopening() throws {
+        let suite = "VitalsTests-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(ProcessListSelection.saved(in: defaults).sort, .cpu)
+        var selection = ProcessListSelection()
+        selection.sort = .memory
+        selection.filter = .all
+        selection.save(to: defaults)
+        let restored = ProcessListSelection.saved(in: defaults)
+        XCTAssertEqual(restored.sort, .memory)
+        XCTAssertEqual(restored.filter, .all)
+    }
 }

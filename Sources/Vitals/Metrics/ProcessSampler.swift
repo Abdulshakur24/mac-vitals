@@ -8,7 +8,7 @@ import Foundation
 /// far more expensive than the numbers are worth, and is exactly the kind of
 /// background cost this app exists to avoid.
 ///
-/// This sampler only runs while the popover is open. Walking every pid costs a
+/// This sampler only runs while the panel is open. Walking every pid costs a
 /// couple of syscalls per process — cheap on demand, pointless to pay every
 /// two seconds when nobody is looking at the result.
 final class ProcessSampler {

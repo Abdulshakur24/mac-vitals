@@ -7,6 +7,18 @@ struct HistorySeries {
     var format: (Double) -> String
 }
 
+extension Array where Element == HistoryPoint {
+    var peak: Double? { map(\.value).max() }
+    var average: Double? { isEmpty ? nil : reduce(0) { $0 + $1.value } / Double(count) }
+
+    /// `peak 82% · avg 14%`, or nothing before the first sample. The buckets
+    /// are five-second peaks, so this average runs a little high by design.
+    func summary(_ format: (Double) -> String) -> String {
+        guard let peak, let average else { return "" }
+        return "peak \(format(peak)) · avg \(format(average))"
+    }
+}
+
 /// Own the readings so an open peak bucket cannot change a pinned value.
 struct HistoryInspection: Equatable {
     var time: TimeInterval
@@ -39,6 +51,8 @@ struct HistoryChart: View {
     var end: TimeInterval
     var duration: TimeInterval
     var ceiling: Double
+    /// Shown between the axis labels while nothing is being inspected.
+    var summary: String = ""
 
     @State private var hoverFraction: Double?
     @State private var pinned: HistoryInspection?
@@ -57,6 +71,7 @@ struct HistoryChart: View {
             GeometryReader { geometry in
                 Canvas { context, size in
                     guard ceiling > 0, duration > 0 else { return }
+                    drawScale(in: &context, size: size)
                     for item in series { draw(item, in: &context, size: size) }
                     if let inspection {
                         let x = position(time: inspection.time, value: 0, size: size).x
@@ -93,7 +108,7 @@ struct HistoryChart: View {
                         })
                 )
             }
-            .frame(height: 40)
+            .frame(height: 56)
             .focusable(allowsKeyboardFocus)
             .focused($focused)
             .onChange(of: allowsKeyboardFocus) { _, enabled in
@@ -110,6 +125,7 @@ struct HistoryChart: View {
             .accessibilityLabel("\(series.map(\.name).joined(separator: " and ")) history")
             .accessibilityValue(accessibilityReading)
             .accessibilityHint("Use arrow keys to inspect samples. Click to pin or release a reading.")
+            .help("Hover to inspect, click to pin. Arrow keys step through samples.")
             .accessibilityAdjustableAction { direction in
                 switch direction {
                 case .increment: moveSelection(forward: true)
@@ -148,13 +164,14 @@ struct HistoryChart: View {
             } else {
                 Text(duration == 300 ? "−5 min" : "−1 hour")
                 Spacer(minLength: 0)
-                Text(series.allSatisfy { $0.points.isEmpty } ? "No samples yet" : "Hover to inspect · click to pin")
+                Text(series.allSatisfy { $0.points.isEmpty } ? "No samples yet" : summary)
                 Spacer(minLength: 0)
                 Text("Now")
             }
         }
-        .font(.system(size: 9).monospacedDigit())
+        .font(.system(size: 10).monospacedDigit())
         .foregroundStyle(.secondary)
+        .lineLimit(1)
     }
 
     private var accessibilityReading: String {
@@ -196,18 +213,52 @@ struct HistoryChart: View {
                 y: 3 + max(0, size.height - 6) * (1 - min(1, max(0, value / ceiling))))
     }
 
+    /// A floor and a midpoint, so a line reads as a level and not just a shape.
+    private func drawScale(in context: inout GraphicsContext, size: CGSize) {
+        var floor = Path(), middle = Path()
+        let bottom = position(time: end, value: 0, size: size).y
+        let half = position(time: end, value: ceiling / 2, size: size).y
+        floor.move(to: CGPoint(x: 0, y: bottom))
+        floor.addLine(to: CGPoint(x: size.width, y: bottom))
+        middle.move(to: CGPoint(x: 0, y: half))
+        middle.addLine(to: CGPoint(x: size.width, y: half))
+        context.stroke(floor, with: .color(.primary.opacity(0.18)), lineWidth: 1)
+        context.stroke(middle, with: .color(.primary.opacity(0.08)), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
+    }
+
     private func draw(_ item: HistorySeries, in context: inout GraphicsContext, size: CGSize) {
         var path = Path()
+        var fill = Path()
+        var segment: [CGPoint] = []
+        let bottom = position(time: end, value: 0, size: size).y
+
+        func closeSegment() {
+            guard let first = segment.first, let last = segment.last, segment.count > 1 else { return }
+            fill.move(to: CGPoint(x: first.x, y: bottom))
+            // Not `addLines`, which starts a new subpath and loses the floor.
+            for point in segment { fill.addLine(to: point) }
+            fill.addLine(to: CGPoint(x: last.x, y: bottom))
+            fill.closeSubpath()
+        }
+
         for (index, sample) in item.points.enumerated() {
             let point = position(time: sample.time, value: sample.value, size: size)
-            if index == 0 || sample.startsSegment { path.move(to: point) }
-            else { path.addLine(to: point) }
             let opensSegment = index == 0 || sample.startsSegment
+            if opensSegment {
+                closeSegment()
+                segment = []
+                path.move(to: point)
+            } else {
+                path.addLine(to: point)
+            }
+            segment.append(point)
             let continues = index + 1 < item.points.count && !item.points[index + 1].startsSegment
             if opensSegment, !continues {
                 context.fill(Path(ellipseIn: CGRect(x: point.x - 1, y: point.y - 1, width: 2, height: 2)), with: .color(item.color))
             }
         }
+        closeSegment()
+        context.fill(fill, with: .color(item.color.opacity(0.14)))
         context.stroke(path, with: .color(item.color), lineWidth: 1)
     }
 }

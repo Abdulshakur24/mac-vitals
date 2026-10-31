@@ -1,5 +1,72 @@
 import Darwin
 import Foundation
+import IOKit
+
+/// Which logical cores are which kind.
+///
+/// Read from the device tree rather than inferred from counts, because the
+/// kernel's order is not a given: on an M4 cpu0–5 are efficiency cores and
+/// cpu6–9 are performance cores, so splitting by a count puts the wrong label
+/// on most of the bars.
+struct CoreLayout: Equatable {
+    struct Group: Equatable {
+        /// "P" or "E", or nil when the kinds could not be established.
+        var label: String?
+        var indices: [Int]
+    }
+
+    /// Performance cores first, then efficiency. A single unlabelled group
+    /// when anything is unknown: an honest row of bars beats a wrong label.
+    var groups: [Group]
+
+    /// `kinds` maps a logical core id to its `cluster-type`.
+    init(kinds: [Int: String], coreCount: Int) {
+        let known = (0..<coreCount).compactMap { index in kinds[index].map { (index, $0) } }
+        let performance = known.filter { $0.1 == "P" }.map(\.0)
+        let efficiency = known.filter { $0.1 == "E" }.map(\.0)
+        guard performance.count + efficiency.count == coreCount, coreCount > 0 else {
+            groups = [Group(label: nil, indices: Array(0..<max(coreCount, 0)))]
+            return
+        }
+        groups = [Group(label: "P", indices: performance), Group(label: "E", indices: efficiency)]
+            .filter { !$0.indices.isEmpty }
+    }
+
+    func count(_ label: String) -> Int {
+        groups.first { $0.label == label }?.indices.count ?? 0
+    }
+
+    /// Logical core id to `cluster-type`, from the `cpus` node of the device
+    /// tree. Empty when the node is missing or shaped differently.
+    static func readKinds() -> [Int: String] {
+        let root = IORegistryEntryFromPath(kIOMainPortDefault, "IODeviceTree:/cpus")
+        guard root != 0 else { return [:] }
+        defer { IOObjectRelease(root) }
+
+        var iterator: io_iterator_t = 0
+        guard IORegistryEntryGetChildIterator(root, kIODeviceTreePlane, &iterator) == KERN_SUCCESS else {
+            return [:]
+        }
+        defer { IOObjectRelease(iterator) }
+
+        var kinds: [Int: String] = [:]
+        while case let core = IOIteratorNext(iterator), core != 0 {
+            defer { IOObjectRelease(core) }
+            func property(_ name: String) -> Any? {
+                IORegistryEntryCreateCFProperty(core, name as CFString, kCFAllocatorDefault, 0)?
+                    .takeRetainedValue()
+            }
+            // Surfaced as a number on an M4. The device tree itself stores raw
+            // little-endian bytes, so that form is accepted too.
+            let id = property("logical-cpu-id")
+            let index = (id as? NSNumber)?.intValue
+                ?? (id as? Data).map { $0.prefix(4).reversed().reduce(0) { $0 << 8 | Int($1) } }
+            guard let index, let type = property("cluster-type") as? Data else { continue }
+            kinds[index] = String(decoding: type.prefix { $0 != 0 }, as: UTF8.self)
+        }
+        return kinds
+    }
+}
 
 struct CPUSample: Equatable {
     /// 0...1 across the whole machine.
@@ -29,22 +96,9 @@ final class CPUSampler {
 
     private var previous: [Ticks] = []
 
-    /// Split point between performance and efficiency cores on Apple Silicon.
-    /// The kernel reports P-cores first, so counts are enough to label them.
-    let performanceCoreCount: Int
-    let efficiencyCoreCount: Int
-
-    init() {
-        performanceCoreCount = Self.sysctlInt("hw.perflevel0.logicalcpu") ?? 0
-        efficiencyCoreCount = Self.sysctlInt("hw.perflevel1.logicalcpu") ?? 0
-    }
-
-    private static func sysctlInt(_ name: String) -> Int? {
-        var value: Int32 = 0
-        var size = MemoryLayout<Int32>.size
-        guard sysctlbyname(name, &value, &size, nil, 0) == 0 else { return nil }
-        return Int(value)
-    }
+    /// Fixed for the life of the machine, so read once.
+    let coreLayout = CoreLayout(kinds: CoreLayout.readKinds(),
+                                coreCount: ProcessInfo.processInfo.processorCount)
 
     func resetBaseline() { previous = [] }
 

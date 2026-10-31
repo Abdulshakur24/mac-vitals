@@ -2,26 +2,43 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// Hosting view that refuses to handle clicks.
-///
-/// An NSHostingView added to a status item button would otherwise eat the
-/// mouse events the button needs to fire its action, leaving an item that
-/// renders correctly but does nothing when clicked.
-private final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-}
-
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
     private let engine = MetricsEngine(historyStore: HistoryStore())
     private let configStore = ConfigStore()
+    private let panelState = PanelState()
 
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
-    private var hostingView: NSView?
+    private var panel: GlassPanel!
+
+    /// Clicks outside the app, which are what close the panel. Local events
+    /// need no monitor: a click on the status item arrives as its own action.
+    private var outsideClicks: Any?
+
+    private var panelResizing: AnyCancellable?
 
     /// What the readout is drawing right now, which is the configured metrics
     /// minus whatever the menu bar has no room for.
-    private let layoutModel = MenuBarLayoutModel()
+    private var layout = MenuBarLayout(items: [])
+
+    /// The latest published sample. `@Published` delivers before the property
+    /// changes, so this is kept from the sink rather than read off the engine.
+    private var latest = Snapshot()
+
+    /// What the status button is showing. Touching the button is what costs,
+    /// so it is only touched when this would change.
+    private var shown: MenuBarReadout?
+
+    /// When the button was last changed, on the `systemUptime` clock.
+    private var lastShown: TimeInterval = 0
+
+    /// Shortest gap between button updates, independent of the sample rate.
+    ///
+    /// Every update makes AppKit snapshot the item for each copy of the menu
+    /// bar, and that is what this app's idle CPU is: measured over a minute at
+    /// a 1s sample rate, 2.8% updating on every change, 1.1% at 2s, 0.8% at 3s.
+    /// Sampling itself is a small fraction of that, so history and the panel
+    /// stay at the full rate and only the menu bar digits are held back.
+    private static let readoutRefresh: TimeInterval = 3
 
     /// Every layout the configured metrics can degrade to, richest first.
     /// Rebuilt on config change only, since the widths in it are fixed.
@@ -93,7 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine.configure(configStore.config)
 
         setUpStatusItem()
-        setUpPopover()
+        setUpPanel()
         observeMenuBarSpace()
 
         configStore.onChange = { [weak self] config in
@@ -102,12 +119,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         engine.start()
 
-        // Opens the popover without a click. Verifying the detail panel
+        // Opens the panel without a click. Verifying the detail panel
         // otherwise needs Accessibility permission just to script a click on
         // the status item, which is a lot of ceremony for a screenshot.
-        if ProcessInfo.processInfo.environment["VITALS_OPEN_POPOVER"] == "1" {
+        //
+        //     VITALS_OPEN_POPOVER=1 Vitals          the panel
+        //     VITALS_OPEN_POPOVER=settings Vitals   its settings pane
+        if let mode = ProcessInfo.processInfo.environment["VITALS_OPEN_POPOVER"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                self?.togglePopover()
+                if mode == "settings" { self?.openSettings() } else { self?.togglePanel() }
             }
         }
     }
@@ -127,31 +147,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.action = #selector(statusItemClicked)
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
-        buildStatusItemContent()
+        button.imagePosition = .imageOnly
+        button.setAccessibilityLabel("Vitals")
+
+        // Colours resolve when the image draws, but a button with an unchanged
+        // image has no reason to draw when the menu bar flips light or dark.
+        button.publisher(for: \.effectiveAppearance)
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.shown = nil
+                self?.showReadout()
+            }
+            .store(in: &cancellables)
+
         setMetrics(configStore.config.menuBar)
     }
 
-    /// Installs the readout. Done once: which metrics it draws is published
-    /// through `layoutModel` rather than baked into the view, so the shape can
-    /// change on every tick without tearing down and rebuilding a hosting view.
-    private func buildStatusItemContent() {
+    /// Applies a layout to the status item: the readout and the length change
+    /// together, so the button is never drawn at the wrong width.
+    private func setLayout(_ newLayout: MenuBarLayout) {
+        layout = newLayout
+        statusItem.length = newLayout.width
+        showReadout()
+        // Tooltip regions are fixed rectangles and the button has just resized.
         guard let button = statusItem.button else { return }
+        button.removeAllToolTips()
+        button.addToolTip(NSRect(x: 0, y: 0, width: newLayout.width, height: MenuBarReadout.height),
+                          owner: self, userData: nil)
+    }
 
-        hostingView?.removeFromSuperview()
+    /// Updates the button if, and only if, what it shows has changed.
+    private func showReadout() {
+        guard let button = statusItem.button else { return }
+        let readout = MenuBarReadout(layout: layout, snapshot: latest, thresholds: engine.thresholds)
+        guard readout != shown else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if let shown, !readout.isUrgent(comparedTo: shown),
+           now - lastShown < Self.readoutRefresh { return }
+        lastShown = now
+        shown = readout
+        button.image = MenuBarRenderer.image(for: readout)
+        button.setAccessibilityValue(latest.summary)
+    }
 
-        let hosting = PassthroughHostingView(
-            rootView: MenuBarView(engine: engine, layoutModel: layoutModel)
-        )
-        hosting.translatesAutoresizingMaskIntoConstraints = false
-        button.addSubview(hosting)
-        NSLayoutConstraint.activate([
-            hosting.leadingAnchor.constraint(equalTo: button.leadingAnchor),
-            hosting.trailingAnchor.constraint(equalTo: button.trailingAnchor),
-            hosting.topAnchor.constraint(equalTo: button.topAnchor),
-            hosting.bottomAnchor.constraint(equalTo: button.bottomAnchor),
-        ])
-
-        hostingView = hosting
+    /// Asked for when the tooltip appears, so nothing is built on each sample.
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag,
+              point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+        latest.summary
     }
 
     // MARK: - Fitting the readout to the space there is
@@ -169,8 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setMetrics(_ metrics: [Metric]) {
         ladder = MenuBarLayout.ladder(for: metrics)
         layoutRank = 0
-        layoutModel.layout = ladder[0]
-        statusItem.length = ladder[0].width
+        setLayout(ladder[0])
         // A refusal is about a width, and these are new widths.
         refused = nil
         layoutSettled = false
@@ -236,8 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard rank != layoutRank else { layoutSettled = true; return }
         layoutRank = rank
-        layoutModel.layout = ladder[rank]
-        statusItem.length = ladder[rank].width
+        setLayout(ladder[rank])
         layoutSettled = false
 
         let shape = ladder[rank].items
@@ -264,7 +304,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// app cheap, and re-fitting is not worth a wakeup of its own.
     private func observeMenuBarSpace() {
         engine.$snapshot
-            .sink { [weak self] _ in self?.updateLayout() }
+            .sink { [weak self] snapshot in
+                guard let self else { return }
+                latest = snapshot
+                updateLayout()
+                showReadout()
+            }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(
@@ -288,12 +333,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if NSApp.currentEvent?.type == .rightMouseUp {
             showContextMenu()
         } else {
-            togglePopover()
+            togglePanel()
         }
     }
 
-    private func showContextMenu() {
+    /// One menu for right-clicking the status item and the panel's gear.
+    private func makeMenu() -> NSMenu {
         let menu = NSMenu()
+
+        let settings = NSMenuItem(
+            title: "Settings…",
+            action: #selector(openSettings),
+            keyEquivalent: ""
+        )
+        settings.target = self
+        menu.addItem(settings)
+        menu.addItem(.separator())
+
+        let monitor = NSMenuItem(
+            title: "Activity Monitor",
+            action: #selector(openActivityMonitor),
+            keyEquivalent: ""
+        )
+        monitor.target = self
+        menu.addItem(monitor)
 
         let reveal = NSMenuItem(
             title: "Edit Configuration…",
@@ -318,10 +381,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
+        return menu
+    }
 
+    private func showContextMenu() {
         // Attaching the menu makes the click that follows open it, then it is
-        // detached again so left-click keeps showing the popover instead.
-        statusItem.menu = menu
+        // detached again so left-click keeps showing the panel instead.
+        statusItem.menu = makeMenu()
         statusItem.button?.performClick(nil)
         statusItem.menu = nil
     }
@@ -330,71 +396,118 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         LoginItem.setEnabled(!LoginItem.isEnabled)
     }
 
-    @objc private func revealConfig() {
-        let url = FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/vitals/config.json")
-        NSWorkspace.shared.open(url)
+    @objc private func openSettings() {
+        panelState.showsSettings = true
+        if !panel.isVisible { openPanel() }
     }
 
-    // MARK: - Popover
+    @objc private func revealConfig() {
+        let url = configStore.url
+        // Nothing may be registered for .json on a Mac with no code editor, and
+        // `open` fails silently then. Finder at least shows where the file is.
+        if NSWorkspace.shared.urlForApplication(toOpen: url) != nil {
+            NSWorkspace.shared.open(url)
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+    }
 
-    private func setUpPopover() {
-        // Let AppKit supply the system's popover material and appearance.
-        // Adding another glass/material background would cover that surface.
-        popover = NSPopover()
-        popover.behavior = .transient
-        popover.animates = false
+    @objc private func openActivityMonitor() {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.ActivityMonitor") {
+            NSWorkspace.shared.open(url)
+        }
+    }
 
-        engine.isDetailVisible = { [weak popover] in popover?.isShown ?? false }
+    /// Opened at the pointer rather than attached to the gear: the panel is
+    /// SwiftUI and `NSMenu` is what the status item already builds.
+    private func showPanelMenu() {
+        makeMenu().popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    // MARK: - Panel
+
+    private func setUpPanel() {
+        panel = GlassPanel()
+        panel.onCancel = { [weak self] in self?.closePanel() }
+
+        engine.isDetailVisible = { [weak panel] in panel?.isVisible ?? false }
         // The live layout rather than the config, so a temperature readout
         // dropped for want of space also stops the sensors it would have cost
         // to read. Nothing else in the app is expensive enough to be worth
         // gating this way.
         engine.isTemperatureShown = { [weak self] in
-            self?.layoutModel.layout.metrics.contains(.temperature) ?? true
+            self?.layout.metrics.contains(.temperature) ?? true
         }
 
-        // `.transient` popovers close on their own when focus moves elsewhere,
-        // so the engine learns about it here rather than in the toggle. This
-        // is registered once — doing it per open would stack up a duplicate
-        // observer on every click.
-        NotificationCenter.default.addObserver(
-            forName: NSPopover.didCloseNotification,
-            object: popover,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            // Drop the SwiftUI view entirely. A retained NSHostingController
-            // keeps re-evaluating its body on every engine update even while
-            // the popover is off screen — profiling showed PopoverView.body
-            // running on every tick with nothing visible, which is most of
-            // this app's idle cost.
-            popover.contentViewController = nil
+        // Another app coming forward by keyboard, or a Space change, is the
+        // same as clicking away, and neither is a click.
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
+            workspace.publisher(for: name)
+                .sink { [weak self] _ in self?.closePanel() }
+                .store(in: &cancellables)
         }
     }
 
-    private func togglePopover() {
-        guard let button = statusItem.button else { return }
+    private func togglePanel() {
+        if panel.isVisible { closePanel() } else { openPanel() }
+    }
 
-        if popover.isShown {
-            popover.performClose(nil)
-            return
-        }
+    private func openPanel() {
+        guard let button = statusItem.button else { return }
 
         engine.prepareDetailSamplers()
 
         // Built fresh on each open and torn down on close, so the detail view
         // costs nothing at all while hidden.
-        let controller = NSHostingController(rootView: PopoverView(engine: engine))
-        // Without this the popover keeps its default content size and the
-        // SwiftUI view overflows it — the top sections get clipped straight
-        // off. `.preferredContentSize` makes the controller publish SwiftUI's
-        // ideal height so the popover sizes itself to the whole panel.
+        let height = button.window?.screen?.visibleFrame.height ?? NSScreen.main?.visibleFrame.height ?? 800
+        let controller = NSHostingController(rootView: PanelView(
+            engine: engine,
+            config: configStore,
+            panel: panelState,
+            maxHeight: min(700, height - 40),
+            showMenu: { [weak self] in self?.showPanelMenu() },
+            editConfig: { [weak self] in self?.revealConfig() }
+        ))
+        // Publishes SwiftUI's ideal size, so the window can follow its content
+        // as tabs change and warnings come and go.
         controller.sizingOptions = [.preferredContentSize]
-        popover.contentViewController = controller
+        panel.contentViewController = controller
+        panelResizing = controller.publisher(for: \.preferredContentSize)
+            .sink { [weak self] size in self?.placePanel(size) }
 
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
-        popover.contentViewController?.view.window?.makeKey()
+        placePanel(controller.view.fittingSize)
+        panel.makeKeyAndOrderFront(nil)
+        button.highlight(true)
+
+        outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.closePanel()
+        }
+    }
+
+    /// Every way of dismissing the panel comes through here, and it drops the
+    /// SwiftUI view entirely. A retained hosting controller keeps re-evaluating
+    /// its body on every engine update even off screen, which profiling once
+    /// showed was most of this app's idle cost.
+    private func closePanel() {
+        guard panel.isVisible else { return }
+        if let outsideClicks { NSEvent.removeMonitor(outsideClicks) }
+        outsideClicks = nil
+        panelResizing = nil
+        panel.orderOut(nil)
+        panel.contentViewController = nil
+        panelState.showsSettings = false
+        statusItem.button?.highlight(false)
+    }
+
+    /// Hangs the panel under the status item, centred on it where the screen
+    /// allows. The top edge stays put as the height changes, like a menu.
+    private func placePanel(_ size: NSSize) {
+        guard size.width > 0, size.height > 0, let item = statusItem.button?.window,
+              let screen = item.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let x = min(max(item.frame.midX - size.width / 2, visible.minX), visible.maxX - size.width)
+        panel.setFrame(NSRect(x: x, y: item.frame.minY - size.height, width: size.width, height: size.height),
+                       display: true)
     }
 }

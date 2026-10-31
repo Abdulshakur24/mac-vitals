@@ -5,13 +5,15 @@ import Foundation
 /// Everything the UI draws, in one value type.
 ///
 /// Values and timestamped history are published together on the existing tick;
-/// the popover observes a consistent sample without a separate chart timer.
+/// the panel observes a consistent sample without a separate chart timer.
 struct Snapshot: Equatable {
     var cpu = CPUSample()
     var memory = MemorySample()
     var network = NetworkSample()
     var disk = DiskSample()
     var thermal = ThermalSample()
+    /// nil on a Mac with no internal battery.
+    var battery: BatterySample?
     var processes = ProcessSample()
 
     var cpuHistory = MetricHistory()
@@ -32,7 +34,7 @@ struct Snapshot: Equatable {
 ///   - exactly one timer, generous tolerance so macOS coalesces our wakeups
 ///     with other system timers rather than waking the CPU on its own
 ///   - sampling stops entirely when the machine or its display sleeps
-///   - expensive samplers are demand-driven, running only while the popover
+///   - expensive samplers are demand-driven, running only while the panel
 ///     is actually on screen
 final class MetricsEngine: ObservableObject {
     @Published private(set) var snapshot = Snapshot()
@@ -58,6 +60,7 @@ final class MetricsEngine: ObservableObject {
     private let networkSampler = NetworkSampler()
     private let diskSampler = DiskSampler()
     private let thermalSampler = ThermalSampler()
+    private let batterySampler = BatterySampler()
     private let processSampler: ProcessSampler
     private let historyStore: HistoryStore?
 
@@ -73,15 +76,20 @@ final class MetricsEngine: ObservableObject {
     private let baseThermalInterval: TimeInterval = 16
     private var lastThermalSample: TimeInterval = 0
 
+    /// Seconds between battery reads. Charge moves slowly, and plugging in or
+    /// unplugging arrives by notification rather than by waiting for this.
+    private let batteryInterval: TimeInterval = 30
+    private var lastBatterySample: TimeInterval = 0
+
     private var timer: Timer?
     private var isSuspended = false
 
     /// Whether the detail panel is on screen, so its expensive samplers can be
     /// skipped when it is not.
     ///
-    /// This asks the popover directly rather than tracking a flag that gets
+    /// This asks the panel directly rather than tracking a flag that gets
     /// set on open and cleared on close. A flag has to be cleared by every
-    /// path that can dismiss a popover — clicking away, another app taking
+    /// path that can dismiss the panel — clicking away, another app taking
     /// focus, the window closing — and missing one leaves it stuck true, which
     /// silently makes the app walk the entire process table every two seconds
     /// forever. Asking the source of truth cannot desynchronise.
@@ -95,9 +103,17 @@ final class MetricsEngine: ObservableObject {
 
     /// Primes the per-process CPU baseline so the first visible reading is a
     /// real delta rather than a column of zeros. Called when the panel opens.
+    ///
+    /// The real reading normally arrives on the next tick, but at a long sample
+    /// interval that could be a minute away, so this takes one of its own if no
+    /// tick has got there first. A single delayed call, not a second timer.
     func prepareDetailSamplers() {
         processSampler.resetBaseline()
         snapshot.processes = processSampler.sample()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, isDetailVisible(), snapshot.processes.state == .sampling else { return }
+            snapshot.processes = processSampler.sample()
+        }
     }
 
     /// The rate asked for in the config file.
@@ -122,8 +138,7 @@ final class MetricsEngine: ObservableObject {
         isLowPower ? baseThermalInterval * Self.lowPowerFactor : baseThermalInterval
     }
 
-    var performanceCoreCount: Int { cpuSampler.performanceCoreCount }
-    var efficiencyCoreCount: Int { cpuSampler.efficiencyCoreCount }
+    var coreLayout: CoreLayout { cpuSampler.coreLayout }
 
     init(interval: TimeInterval = 1.0, initialSnapshot: Snapshot = Snapshot(),
          processSampler: ProcessSampler = ProcessSampler(), historyStore: HistoryStore? = nil) {
@@ -134,6 +149,11 @@ final class MetricsEngine: ObservableObject {
         self.historyStore = historyStore
         if let restored { attentionTracker.restore(restored.attention) }
         observePowerNotifications()
+        batterySampler.observeChanges { [weak self] in
+            guard let self else { return }
+            snapshot.battery = batterySampler.sample()
+            lastBatterySample = ProcessInfo.processInfo.systemUptime
+        }
     }
 
     func saveHistory() {
@@ -159,7 +179,7 @@ final class MetricsEngine: ObservableObject {
         // energy win available to a polling menu bar app.
         timer.tolerance = interval / 2
 
-        // .common rather than .default: while a popover or menu is tracking,
+        // .common rather than .default: while a menu is tracking,
         // the run loop leaves default mode and a default-mode timer silently
         // stops firing — the numbers would freeze exactly when being read.
         RunLoop.main.add(timer, forMode: .common)
@@ -207,6 +227,7 @@ final class MetricsEngine: ObservableObject {
         networkSampler.resetBaseline()
         diskSampler.resetBaseline()
         lastThermalSample = 0
+        lastBatterySample = 0
         start()
     }
 
@@ -278,6 +299,11 @@ final class MetricsEngine: ObservableObject {
             lastThermalSample = now
         }
 
+        if now - lastBatterySample >= batteryInterval {
+            next.battery = batterySampler.sample()
+            lastBatterySample = now
+        }
+
         // Public thermal state remains available without temperature sensors.
         next.thermal.state = ProcessInfo.processInfo.thermalState
         // A failed sample must not sustain a warning using an old reading.
@@ -289,7 +315,8 @@ final class MetricsEngine: ObservableObject {
             next.diskReadHistory.markGap()
             next.diskWriteHistory.markGap()
         }
-        attentionTracker.update(snapshot: evidence, thresholds: thresholds, at: timestamp)
+        let change = attentionTracker.update(snapshot: evidence, thresholds: thresholds, at: timestamp)
+        nameCulprits(for: change, processes: next.processes)
         next.attention = attentionTracker.events
 
         // Walking the process table is the most expensive thing here, so it
@@ -303,5 +330,27 @@ final class MetricsEngine: ObservableObject {
         // here could never find two snapshots alike.
         snapshot = next
         historyStore?.checkpoint(next)
+    }
+
+    /// Records who was responsible when a warning fires.
+    ///
+    /// By the time anyone opens the panel the load has often passed, so this is
+    /// the one thing that cannot wait for them. A CPU reading needs two scans:
+    /// a baseline as the condition begins, and a second when it has lasted, so
+    /// the figure is the average across the whole dwell rather than an instant.
+    /// While the panel is open the process list is already running on its own
+    /// baseline, so that is left alone and its latest reading used instead.
+    private func nameCulprits(for change: AttentionChange, processes: ProcessSample) {
+        let panelOpen = isDetailVisible()
+        if change.dwellStarted.contains(.cpu), !change.raised.contains(.cpu), !panelOpen {
+            processSampler.resetBaseline()
+            _ = processSampler.sample()
+        }
+        let kinds = change.raised.intersection([.cpu, .memory])
+        guard !kinds.isEmpty else { return }
+        let sample = panelOpen ? processes : processSampler.sample()
+        for kind in kinds {
+            attentionTracker.setCulprit(sample.culprit(for: kind), for: kind)
+        }
     }
 }

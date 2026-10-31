@@ -21,6 +21,10 @@ final class PreviewTests: XCTestCase {
         snapshot.network = NetworkSample(download: 2_000_000, upload: 40_000, sessionReceived: 800 << 20, interface: "en0", ipAddress: "192.0.2.1")
         snapshot.disk = DiskSample(read: 20_000, write: 500_000, free: 28 << 30, total: 460 << 30)
         snapshot.thermal = ThermalSample(cpu: 44, cpuAverage: 39, ssd: 31, battery: 27)
+        snapshot.battery = BatterySample(description: ["Type": "InternalBattery", "Current Capacity": 38, "Max Capacity": 100,
+                                                       "Power Source State": "Battery Power", "Time to Empty": 100],
+                                         registry: ["CycleCount": NSNumber(value: 340),
+                                                    "PowerTelemetryData": ["SystemLoad": NSNumber(value: 13146)]])
         for seconds in stride(from: 300, through: 0, by: -1) {
             if (100...130).contains(seconds) { continue }
             let value = 0.2 + 0.12 * sin(Double(seconds) / 14)
@@ -28,24 +32,40 @@ final class PreviewTests: XCTestCase {
             snapshot.memoryHistory.append(0.66 + value / 10, at: now - Double(seconds), interval: 1)
             snapshot.downloadHistory.append(value * 10_000_000, at: now - Double(seconds), interval: 1)
             snapshot.uploadHistory.append(value * 200_000, at: now - Double(seconds), interval: 1)
+            snapshot.diskReadHistory.append(value * 300_000, at: now - Double(seconds), interval: 1)
+            snapshot.diskWriteHistory.append((1 - value) * 900_000, at: now - Double(seconds), interval: 1)
         }
-        snapshot.attention = [AttentionEvent(kind: .disk, title: "Disk space is low", detail: "28.0 GB available · below 10%", startedAt: now - 60)]
+        snapshot.attention = [AttentionEvent(kind: .disk, title: "Disk space is low", detail: "28.0 GB available · below 10%", startedAt: now - 60),
+                              AttentionEvent(kind: .cpu, title: "CPU use remains high", detail: "82% overall · at or above 70%", startedAt: now - 30, culprit: "Xcode 180%"),
+                              AttentionEvent(kind: .memory, title: "Memory pressure is elevated", detail: "1.2 GB swap in use", startedAt: now - 900, endedAt: now - 480, culprit: "Safari 4.0 GB")]
         snapshot.processes = processFixture()
         let engine = MetricsEngine(initialSnapshot: snapshot)
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-        for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
-            let view = NSHostingView(rootView: PopoverView(engine: engine).background(scheme == .dark ? Color(white: 0.12) : Color(white: 0.96)).environment(\.colorScheme, scheme))
-            view.frame = NSRect(x: 0, y: 0, width: 360, height: 700)
-            let window = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
-            window.contentView = view
-            window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
-            view.layoutSubtreeIfNeeded()
-            let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
-            view.cacheDisplay(in: view.bounds, to: bitmap)
-            let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-            try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("popover-\(name).png"))
-            window.contentView = nil
+        let store = ConfigStore(directory: URL(fileURLWithPath: directory).appendingPathComponent("config-\(UUID())"))
+        let panel = PanelState()
+        for tab in PanelTab.allCases + [nil] {
+            UserDefaults.standard.set(tab?.rawValue, forKey: "panel.tab")
+            panel.showsSettings = tab == nil
+            for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
+                let view = NSHostingView(rootView: PanelView(engine: engine, config: store, panel: panel, maxHeight: 2000).background(scheme == .dark ? Color(white: 0.12) : Color(white: 0.96)).environment(\.colorScheme, scheme))
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 1400), styleMask: .borderless, backing: .buffered, defer: false)
+                window.contentView = view
+                window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+                // Two passes: the panel measures itself and then takes that height.
+                for _ in 0..<3 {
+                    view.layoutSubtreeIfNeeded()
+                    try await Task.sleep(for: .milliseconds(100))
+                    view.setFrameSize(view.fittingSize)
+                }
+                view.layoutSubtreeIfNeeded()
+                let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("popover-\(tab?.rawValue.lowercased() ?? "settings")-\(name).png"))
+                window.contentView = nil
+            }
         }
+        UserDefaults.standard.removeObject(forKey: "panel.tab")
     }
 
     /// Focused variants keep the expandable rows visible in offscreen review.

@@ -9,12 +9,13 @@ enum Probe {
         let network = NetworkSampler()
         let disk = DiskSampler()
         let thermal = ThermalSampler()
+        let battery = BatterySampler()
         let processes = ProcessSampler()
 
         print("thermal sensors available: \(thermal.isAvailable)")
         print("low power mode: \(ProcessInfo.processInfo.isLowPowerModeEnabled)")
 
-        print("cores: \(cpu.performanceCoreCount)P + \(cpu.efficiencyCoreCount)E")
+        print("cores: \(cpu.coreLayout.count("P"))P + \(cpu.coreLayout.count("E"))E")
 
         // Prime the delta-based samplers; their first call has no baseline.
         _ = cpu.sample()
@@ -32,10 +33,12 @@ enum Probe {
                     sample.total * 100, sample.user * 100,
                     sample.system * 100, sample.idle * 100
                 ))
-                let cores = sample.perCore
-                    .map { String(format: "%.0f", $0 * 100) }
-                    .joined(separator: " ")
-                print("cores  \(cores)")
+                for group in cpu.coreLayout.groups {
+                    let loads = group.indices.filter(sample.perCore.indices.contains)
+                        .map { String(format: "%.0f", sample.perCore[$0] * 100) }
+                        .joined(separator: " ")
+                    print("cores  \(group.label ?? "?"): \(loads)")
+                }
             }
 
             if let sample = memory.sample() {
@@ -85,6 +88,17 @@ enum Probe {
                 disk   read \(Format.rate(sample.read))  write \(Format.rate(sample.write))  \
                 free \(Format.bytes(sample.free)) / \(Format.bytes(sample.total))
                 """)
+            }
+
+            if let sample = battery.sample() {
+                print("""
+                batt   \(sample.percent)% \(sample.state)  \
+                \(sample.minutesRemaining.map { Format.duration(Double($0) * 60) } ?? "no estimate")  \
+                \(sample.watts.map { String(format: "%.1f W", $0) } ?? "- W")  \
+                \(sample.cycleCount.map { "\($0) cycles" } ?? "")
+                """)
+            } else {
+                print("batt   none")
             }
 
             if round == 3 {

@@ -8,38 +8,32 @@ import SwiftUI
 /// percentage hides which one you are in.
 struct CoreBars: View {
     var loads: [Double]
-    var performanceCoreCount: Int
-
-    private var performanceLoads: [Double] {
-        Array(loads.prefix(performanceCoreCount))
-    }
-    private var efficiencyLoads: [Double] {
-        performanceCoreCount < loads.count
-            ? Array(loads.dropFirst(performanceCoreCount)) : []
-    }
+    var layout: CoreLayout
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 10) {
-            if !performanceLoads.isEmpty {
-                group(performanceLoads, label: "P", tint: .accentColor)
-            }
-            if !efficiencyLoads.isEmpty {
-                group(efficiencyLoads, label: "E", tint: .teal)
+            ForEach(layout.groups, id: \.label) { group in
+                let values = group.indices.filter(loads.indices.contains).map { loads[$0] }
+                if !values.isEmpty {
+                    self.group(values, label: group.label, tint: group.label == "E" ? .teal : .accentColor)
+                }
             }
             Spacer(minLength: 0)
         }
     }
 
-    private func group(_ values: [Double], label: String, tint: Color) -> some View {
+    private func group(_ values: [Double], label: String?, tint: Color) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .bottom, spacing: 2) {
                 ForEach(Array(values.enumerated()), id: \.offset) { _, load in
                     bar(load: load, tint: tint)
                 }
             }
-            Text(label)
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
+            if let label {
+                Text(label)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

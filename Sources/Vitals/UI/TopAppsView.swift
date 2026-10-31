@@ -6,8 +6,9 @@ struct TopAppsView: View {
     @State private var selection: ProcessListSelection
     @State private var icons: [URL: NSImage] = [:]
     @State private var pendingForceQuit: AppQuitRequest?
-    @State private var showForceConfirmation = false
     @State private var feedback: AppQuitFeedback?
+    @State private var hoveredRow: ProcessGroup.ID?
+    @FocusState private var focusedActions: ProcessGroup.ID?
     private let quitController: AppQuitController
 
     init(sample: ProcessSample, selection: ProcessListSelection = .init(), quitController: AppQuitController? = nil) {
@@ -23,29 +24,22 @@ struct TopAppsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Top apps").fontWeight(.semibold)
-                Spacer()
-                Picker("Include processes", selection: $selection.filter) {
-                    ForEach(ProcessFilter.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+            HStack(spacing: 6) {
+                Toggle("All processes", isOn: Binding(
+                    get: { selection.filter == .all },
+                    set: { selection.filter = $0 ? .all : .apps }
+                ))
+                .toggleStyle(.checkbox)
                 .controlSize(.small)
-                .frame(width: 110)
-                .help("All includes system services and command-line tools without an app bundle.")
-            }
-
-            HStack {
-                Text("Sort by").foregroundStyle(.secondary)
-                Picker("Rank apps by", selection: $selection.sort) {
-                    ForEach(ProcessSort.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 130)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .help("Include system services and command-line tools without an app bundle.")
                 Spacer(minLength: 0)
+                sortHeader(.cpu, title: "CPU", width: 48,
+                           help: "100% CPU = one fully busy core. Click to sort.")
+                sortHeader(.memory, title: "Memory", width: 68,
+                           help: "Resident memory. Totals can include shared pages. Click to sort.")
+                Color.clear.frame(width: 18, height: 1).accessibilityHidden(true)
             }
 
             switch sample.state {
@@ -56,6 +50,8 @@ struct TopAppsView: View {
             case .ready:
                 rankings
             }
+
+            if let pendingForceQuit { forceQuitConfirmation(pendingForceQuit) }
 
             if let feedback {
                 HStack(alignment: .top, spacing: 6) {
@@ -71,21 +67,9 @@ struct TopAppsView: View {
                 }
             }
 
-            Text("100% CPU = one fully busy core")
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
-            Text("Resident memory · totals can include shared pages")
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
         }
-        .confirmationDialog("Force quit \(pendingForceQuit?.name ?? "app")?",
-                            isPresented: $showForceConfirmation, titleVisibility: .visible,
-                            presenting: pendingForceQuit) { request in
-            Button("Force Quit", role: .destructive) { perform(request, mode: .forceQuit) }
-            Button("Cancel", role: .cancel) { pendingForceQuit = nil }
-        } message: { request in
-            Text(request.confirmationMessage)
-        }
+        .onChange(of: selection.sort) { _, _ in selection.frozenOrder = nil; selection.save() }
+        .onChange(of: selection.filter) { _, _ in selection.frozenOrder = nil; selection.save() }
         .onChange(of: liveIDs) { _, _ in
             selection.retainLiveGroups(in: sample)
             guard sample.state == .ready else { return }
@@ -109,20 +93,13 @@ struct TopAppsView: View {
             Text(selection.filter == .apps ? "No apps available. Try All for other processes." : "No processes available.")
                 .foregroundStyle(.secondary)
         } else {
-            HStack(spacing: 6) {
-                Text(selection.filter == .apps ? "App" : "App / process")
-                Spacer(minLength: 0)
-                Text("CPU").frame(width: 48, alignment: .trailing)
-                Text("Resident").frame(width: 68, alignment: .trailing)
-                Color.clear.frame(width: 18, height: 1).accessibilityHidden(true)
-            }
-            .font(.system(size: 9))
-            .foregroundStyle(.secondary)
-
             VStack(spacing: 2) {
                 ForEach(selection.displayed(in: sample)) { group in
                     groupRow(group)
                 }
+            }
+            .onHover { inside in
+                selection.frozenOrder = inside ? selection.displayed(in: sample).map(\.id) : nil
             }
 
             if ranked.count > 5 {
@@ -135,8 +112,29 @@ struct TopAppsView: View {
         }
     }
 
+    /// A column title that doubles as the sort control, like a table's.
+    private func sortHeader(_ sort: ProcessSort, title: String, width: CGFloat, help: String) -> some View {
+        let active = selection.sort == sort
+        return Button { selection.sort = sort } label: {
+            HStack(spacing: 2) {
+                Spacer(minLength: 0)
+                Text(title)
+                if active { Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold)) }
+            }
+            .frame(width: width)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .font(.system(size: 10, weight: active ? .semibold : .regular))
+        .foregroundStyle(active ? Color.primary : Color.secondary)
+        .help(help)
+        .accessibilityLabel("Sort by \(title)")
+        .accessibilityAddTraits(active ? .isSelected : [])
+    }
+
     private func groupRow(_ group: ProcessGroup) -> some View {
         let expanded = selection.expanded.contains(group.id)
+        let showsActions = hoveredRow == group.id || focusedActions == group.id
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 Button {
@@ -151,8 +149,10 @@ struct TopAppsView: View {
                         icon(group)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(group.name).lineLimit(1).truncationMode(.middle)
-                            Text("\(group.processes.count) \(group.processes.count == 1 ? "process" : "processes")")
-                                .font(.system(size: 9)).foregroundStyle(.secondary)
+                            if group.processes.count > 1 {
+                                Text("\(group.processes.count) processes")
+                                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         values(cpu: group.cpu, memory: group.memory)
@@ -176,12 +176,18 @@ struct TopAppsView: View {
                     .menuIndicator(.hidden)
                     .fixedSize()
                     .frame(width: 18)
+                    .opacity(showsActions ? 1 : 0)
+                    .focused($focusedActions, equals: group.id)
                     .disabled(!quitController.canQuit(group))
                     .help("Actions for \(group.name)")
                     .accessibilityLabel("Actions for \(group.name)")
                 } else {
                     Color.clear.frame(width: 18, height: 1).accessibilityHidden(true)
                 }
+            }
+            .onHover { inside in
+                if inside { hoveredRow = group.id }
+                else if hoveredRow == group.id { hoveredRow = nil }
             }
             .contextMenu {
                 if quitController.canQuit(group) { appActions(group) }
@@ -193,7 +199,7 @@ struct TopAppsView: View {
                         HStack(spacing: 6) {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(row.name).lineLimit(1).truncationMode(.middle)
-                                Text("PID \(row.pid)").font(.system(size: 9)).foregroundStyle(.secondary)
+                                Text("PID \(row.pid)").font(.system(size: 10)).foregroundStyle(.secondary)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             values(cpu: row.cpu, memory: row.memory)
@@ -219,13 +225,31 @@ struct TopAppsView: View {
             let request = try quitController.prepare(group)
             if mode == .forceQuit {
                 pendingForceQuit = request
-                showForceConfirmation = true
             } else {
                 perform(request, mode: mode)
             }
         } catch {
             feedback = AppQuitFeedback(message: error.localizedDescription, isError: true)
         }
+    }
+
+    /// Inline rather than a dialog. The panel is a clear borderless window, and
+    /// a sheet on one has no title bar to hang from.
+    private func forceQuitConfirmation(_ request: AppQuitRequest) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Force quit \(request.name)?").fontWeight(.semibold)
+            Text(request.confirmationMessage).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel") { pendingForceQuit = nil }
+                    .keyboardShortcut(.cancelAction)
+                Button("Force Quit", role: .destructive) { perform(request, mode: .forceQuit) }
+            }
+            .controlSize(.small)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.18), in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func perform(_ request: AppQuitRequest, mode: AppQuitMode) {

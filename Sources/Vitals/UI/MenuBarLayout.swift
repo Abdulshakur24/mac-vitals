@@ -6,6 +6,7 @@ enum Metric: String, Hashable, CaseIterable, Codable {
     case network
     case disk
     case temperature
+    case battery
 
     /// How much of a metric is drawn.
     ///
@@ -30,6 +31,8 @@ enum Metric: String, Hashable, CaseIterable, Codable {
         case (.disk, .full): 34        // "100%"
         case (.disk, .compact): 30     // "100%", tighter
         case (.temperature, _): 26     // "100°" is already minimal
+        case (.battery, .full): 40     // "⚡100%"
+        case (.battery, .compact): 30  // "100%"
         }
     }
 }
@@ -53,8 +56,6 @@ struct MenuBarLayout: Equatable {
 
     var items: [Item]
 
-    private static let horizontalPadding: CGFloat = 5
-
     /// Tighter once anything is compact: the gaps are ornament too, and at that
     /// point every point is worth having.
     var spacing: CGFloat {
@@ -66,7 +67,7 @@ struct MenuBarLayout: Equatable {
         guard !items.isEmpty else { return 26 }
         let blocks = items.reduce(0) { $0 + $1.metric.width($1.style) }
         let gaps = CGFloat(items.count - 1) * spacing
-        return blocks + gaps + Self.horizontalPadding * 2
+        return blocks + gaps + MenuBarReadout.horizontalPadding * 2
     }
 
     var metrics: [Metric] { items.map(\.metric) }
