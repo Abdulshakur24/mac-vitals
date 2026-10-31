@@ -8,7 +8,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
     private let panelState = PanelState()
 
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
+    private var panel: GlassPanel!
+
+    /// Clicks outside the app, which are what close the panel. Local events
+    /// need no monitor: a click on the status item arrives as its own action.
+    private var outsideClicks: Any?
+
+    private var panelResizing: AnyCancellable?
 
     /// What the readout is drawing right now, which is the configured metrics
     /// minus whatever the menu bar has no room for.
@@ -104,7 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
         engine.configure(configStore.config)
 
         setUpStatusItem()
-        setUpPopover()
+        setUpPanel()
         observeMenuBarSpace()
 
         configStore.onChange = { [weak self] config in
@@ -113,12 +119,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
 
         engine.start()
 
-        // Opens the popover without a click. Verifying the detail panel
+        // Opens the panel without a click. Verifying the detail panel
         // otherwise needs Accessibility permission just to script a click on
         // the status item, which is a lot of ceremony for a screenshot.
-        if ProcessInfo.processInfo.environment["VITALS_OPEN_POPOVER"] == "1" {
+        //
+        //     VITALS_OPEN_POPOVER=1 Vitals          the panel
+        //     VITALS_OPEN_POPOVER=settings Vitals   its settings pane
+        if let mode = ProcessInfo.processInfo.environment["VITALS_OPEN_POPOVER"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                self?.togglePopover()
+                if mode == "settings" { self?.openSettings() } else { self?.togglePanel() }
             }
         }
     }
@@ -324,7 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
         if NSApp.currentEvent?.type == .rightMouseUp {
             showContextMenu()
         } else {
-            togglePopover()
+            togglePanel()
         }
     }
 
@@ -377,7 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
 
     private func showContextMenu() {
         // Attaching the menu makes the click that follows open it, then it is
-        // detached again so left-click keeps showing the popover instead.
+        // detached again so left-click keeps showing the panel instead.
         statusItem.menu = makeMenu()
         statusItem.button?.performClick(nil)
         statusItem.menu = nil
@@ -389,7 +398,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
 
     @objc private func openSettings() {
         panelState.showsSettings = true
-        if !popover.isShown { togglePopover() }
+        if !panel.isVisible { openPanel() }
     }
 
     @objc private func revealConfig() {
@@ -415,16 +424,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
         makeMenu().popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
-    // MARK: - Popover
+    // MARK: - Panel
 
-    private func setUpPopover() {
-        // Let AppKit supply the system's popover material and appearance.
-        // Adding another glass/material background would cover that surface.
-        popover = NSPopover()
-        popover.behavior = .transient
-        popover.animates = false
+    private func setUpPanel() {
+        panel = GlassPanel()
+        panel.onCancel = { [weak self] in self?.closePanel() }
 
-        engine.isDetailVisible = { [weak popover] in popover?.isShown ?? false }
+        engine.isDetailVisible = { [weak panel] in panel?.isVisible ?? false }
         // The live layout rather than the config, so a temperature readout
         // dropped for want of space also stops the sensors it would have cost
         // to read. Nothing else in the app is expensive enough to be worth
@@ -433,41 +439,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
             self?.layout.metrics.contains(.temperature) ?? true
         }
 
-        // `.transient` popovers close on their own when focus moves elsewhere,
-        // so the engine learns about it here rather than in the toggle. This
-        // is registered once — doing it per open would stack up a duplicate
-        // observer on every click.
-        NotificationCenter.default.addObserver(
-            forName: NSPopover.didCloseNotification,
-            object: popover,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            // Drop the SwiftUI view entirely. A retained NSHostingController
-            // keeps re-evaluating its body on every engine update even while
-            // the popover is off screen — profiling showed PopoverView.body
-            // running on every tick with nothing visible, which is most of
-            // this app's idle cost.
-            popover.contentViewController = nil
-            panelState.showsSettings = false
-            statusItem.button?.highlight(false)
+        // Another app coming forward by keyboard, or a Space change, is the
+        // same as clicking away, and neither is a click.
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
+            workspace.publisher(for: name)
+                .sink { [weak self] _ in self?.closePanel() }
+                .store(in: &cancellables)
         }
     }
 
-    private func togglePopover() {
-        guard let button = statusItem.button else { return }
+    private func togglePanel() {
+        if panel.isVisible { closePanel() } else { openPanel() }
+    }
 
-        if popover.isShown {
-            popover.performClose(nil)
-            return
-        }
+    private func openPanel() {
+        guard let button = statusItem.button else { return }
 
         engine.prepareDetailSamplers()
 
         // Built fresh on each open and torn down on close, so the detail view
         // costs nothing at all while hidden.
         let height = button.window?.screen?.visibleFrame.height ?? NSScreen.main?.visibleFrame.height ?? 800
-        let controller = NSHostingController(rootView: PopoverView(
+        let controller = NSHostingController(rootView: PanelView(
             engine: engine,
             config: configStore,
             panel: panelState,
@@ -475,15 +469,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSViewToolTipOwner {
             showMenu: { [weak self] in self?.showPanelMenu() },
             editConfig: { [weak self] in self?.revealConfig() }
         ))
-        // Without this the popover keeps its default content size and the
-        // SwiftUI view overflows it — the top sections get clipped straight
-        // off. `.preferredContentSize` makes the controller publish SwiftUI's
-        // ideal height so the popover sizes itself to the whole panel.
+        // Publishes SwiftUI's ideal size, so the window can follow its content
+        // as tabs change and warnings come and go.
         controller.sizingOptions = [.preferredContentSize]
-        popover.contentViewController = controller
+        panel.contentViewController = controller
+        panelResizing = controller.publisher(for: \.preferredContentSize)
+            .sink { [weak self] size in self?.placePanel(size) }
 
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
-        popover.contentViewController?.view.window?.makeKey()
+        placePanel(controller.view.fittingSize)
+        panel.makeKeyAndOrderFront(nil)
         button.highlight(true)
+
+        outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.closePanel()
+        }
+    }
+
+    /// Every way of dismissing the panel comes through here, and it drops the
+    /// SwiftUI view entirely. A retained hosting controller keeps re-evaluating
+    /// its body on every engine update even off screen, which profiling once
+    /// showed was most of this app's idle cost.
+    private func closePanel() {
+        guard panel.isVisible else { return }
+        if let outsideClicks { NSEvent.removeMonitor(outsideClicks) }
+        outsideClicks = nil
+        panelResizing = nil
+        panel.orderOut(nil)
+        panel.contentViewController = nil
+        panelState.showsSettings = false
+        statusItem.button?.highlight(false)
+    }
+
+    /// Hangs the panel under the status item, centred on it where the screen
+    /// allows. The top edge stays put as the height changes, like a menu.
+    private func placePanel(_ size: NSSize) {
+        guard size.width > 0, size.height > 0, let item = statusItem.button?.window,
+              let screen = item.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let x = min(max(item.frame.midX - size.width / 2, visible.minX), visible.maxX - size.width)
+        panel.setFrame(NSRect(x: x, y: item.frame.minY - size.height, width: size.width, height: size.height),
+                       display: true)
     }
 }

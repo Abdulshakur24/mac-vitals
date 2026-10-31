@@ -47,7 +47,7 @@ final class PreviewTests: XCTestCase {
             UserDefaults.standard.set(tab?.rawValue, forKey: "panel.tab")
             panel.showsSettings = tab == nil
             for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
-                let view = NSHostingView(rootView: PopoverView(engine: engine, config: store, panel: panel, maxHeight: 2000).background(scheme == .dark ? Color(white: 0.12) : Color(white: 0.96)).environment(\.colorScheme, scheme))
+                let view = NSHostingView(rootView: PanelView(engine: engine, config: store, panel: panel, maxHeight: 2000).background(scheme == .dark ? Color(white: 0.12) : Color(white: 0.96)).environment(\.colorScheme, scheme))
                 let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 1400), styleMask: .borderless, backing: .buffered, defer: false)
                 window.contentView = view
                 window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)

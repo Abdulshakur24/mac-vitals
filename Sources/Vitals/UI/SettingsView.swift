@@ -2,10 +2,10 @@ import SwiftUI
 
 /// The few settings there are, as a pane of the panel.
 ///
-/// A pane rather than a window or a nested popover: a transient popover closes
-/// the moment focus leaves it, which would take a settings window's owner away
-/// with it. Changes apply as they are made, because the config file reloads
-/// live and there is nothing to confirm.
+/// A pane rather than a window of its own: the panel closes when focus leaves
+/// it, which would take a settings window's owner away with it. Changes apply
+/// as they are made, because the config file reloads live and there is nothing
+/// to confirm.
 struct SettingsView: View {
     @ObservedObject var store: ConfigStore
     var editConfig: () -> Void
@@ -32,8 +32,8 @@ struct SettingsView: View {
                 Text("Settings").font(.system(size: 13, weight: .semibold))
                 Spacer()
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 10)
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
             .padding(.bottom, 8)
 
             if !store.canSave {
@@ -43,9 +43,9 @@ struct SettingsView: View {
                     Spacer(minLength: 0)
                     Button("Open", action: editConfig).controlSize(.small)
                 }
-                .padding(8)
-                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-                .padding(.horizontal, 14)
+                .padding(10)
+                .background(Color.orange.opacity(0.18), in: RoundedRectangle(cornerRadius: 14))
+                .padding(.horizontal, 16)
                 .padding(.bottom, 8)
             }
 
@@ -63,7 +63,7 @@ struct SettingsView: View {
                 ))
                 .toggleStyle(.checkbox)
             }
-            .padding(14)
+            .padding(16)
             .disabled(!store.canSave)
         }
     }

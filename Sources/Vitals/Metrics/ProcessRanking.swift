@@ -115,7 +115,7 @@ struct ProcessSample: Equatable {
     }
 }
 
-/// View state is owned by the popover, which is recreated on each open. Sort
+/// View state is owned by the panel, which is recreated on each open. Sort
 /// and filter are the two choices worth keeping across opens.
 struct ProcessListSelection {
     var sort: ProcessSort = .cpu

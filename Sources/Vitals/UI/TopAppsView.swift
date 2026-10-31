@@ -6,7 +6,6 @@ struct TopAppsView: View {
     @State private var selection: ProcessListSelection
     @State private var icons: [URL: NSImage] = [:]
     @State private var pendingForceQuit: AppQuitRequest?
-    @State private var showForceConfirmation = false
     @State private var feedback: AppQuitFeedback?
     @State private var hoveredRow: ProcessGroup.ID?
     @FocusState private var focusedActions: ProcessGroup.ID?
@@ -52,6 +51,8 @@ struct TopAppsView: View {
                 rankings
             }
 
+            if let pendingForceQuit { forceQuitConfirmation(pendingForceQuit) }
+
             if let feedback {
                 HStack(alignment: .top, spacing: 6) {
                     Text(feedback.message)
@@ -66,14 +67,6 @@ struct TopAppsView: View {
                 }
             }
 
-        }
-        .confirmationDialog("Force quit \(pendingForceQuit?.name ?? "app")?",
-                            isPresented: $showForceConfirmation, titleVisibility: .visible,
-                            presenting: pendingForceQuit) { request in
-            Button("Force Quit", role: .destructive) { perform(request, mode: .forceQuit) }
-            Button("Cancel", role: .cancel) { pendingForceQuit = nil }
-        } message: { request in
-            Text(request.confirmationMessage)
         }
         .onChange(of: selection.sort) { _, _ in selection.frozenOrder = nil; selection.save() }
         .onChange(of: selection.filter) { _, _ in selection.frozenOrder = nil; selection.save() }
@@ -232,13 +225,31 @@ struct TopAppsView: View {
             let request = try quitController.prepare(group)
             if mode == .forceQuit {
                 pendingForceQuit = request
-                showForceConfirmation = true
             } else {
                 perform(request, mode: mode)
             }
         } catch {
             feedback = AppQuitFeedback(message: error.localizedDescription, isError: true)
         }
+    }
+
+    /// Inline rather than a dialog. The panel is a clear borderless window, and
+    /// a sheet on one has no title bar to hang from.
+    private func forceQuitConfirmation(_ request: AppQuitRequest) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Force quit \(request.name)?").fontWeight(.semibold)
+            Text(request.confirmationMessage).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel") { pendingForceQuit = nil }
+                    .keyboardShortcut(.cancelAction)
+                Button("Force Quit", role: .destructive) { perform(request, mode: .forceQuit) }
+            }
+            .controlSize(.small)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.18), in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func perform(_ request: AppQuitRequest, mode: AppQuitMode) {

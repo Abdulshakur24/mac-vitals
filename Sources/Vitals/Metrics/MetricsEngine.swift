@@ -5,7 +5,7 @@ import Foundation
 /// Everything the UI draws, in one value type.
 ///
 /// Values and timestamped history are published together on the existing tick;
-/// the popover observes a consistent sample without a separate chart timer.
+/// the panel observes a consistent sample without a separate chart timer.
 struct Snapshot: Equatable {
     var cpu = CPUSample()
     var memory = MemorySample()
@@ -34,7 +34,7 @@ struct Snapshot: Equatable {
 ///   - exactly one timer, generous tolerance so macOS coalesces our wakeups
 ///     with other system timers rather than waking the CPU on its own
 ///   - sampling stops entirely when the machine or its display sleeps
-///   - expensive samplers are demand-driven, running only while the popover
+///   - expensive samplers are demand-driven, running only while the panel
 ///     is actually on screen
 final class MetricsEngine: ObservableObject {
     @Published private(set) var snapshot = Snapshot()
@@ -87,9 +87,9 @@ final class MetricsEngine: ObservableObject {
     /// Whether the detail panel is on screen, so its expensive samplers can be
     /// skipped when it is not.
     ///
-    /// This asks the popover directly rather than tracking a flag that gets
+    /// This asks the panel directly rather than tracking a flag that gets
     /// set on open and cleared on close. A flag has to be cleared by every
-    /// path that can dismiss a popover — clicking away, another app taking
+    /// path that can dismiss the panel — clicking away, another app taking
     /// focus, the window closing — and missing one leaves it stuck true, which
     /// silently makes the app walk the entire process table every two seconds
     /// forever. Asking the source of truth cannot desynchronise.
@@ -179,7 +179,7 @@ final class MetricsEngine: ObservableObject {
         // energy win available to a polling menu bar app.
         timer.tolerance = interval / 2
 
-        // .common rather than .default: while a popover or menu is tracking,
+        // .common rather than .default: while a menu is tracking,
         // the run loop leaves default mode and a default-mode timer silently
         // stops firing — the numbers would freeze exactly when being read.
         RunLoop.main.add(timer, forMode: .common)

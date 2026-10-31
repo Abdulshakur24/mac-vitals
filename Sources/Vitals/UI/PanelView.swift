@@ -13,10 +13,11 @@ final class PanelState: ObservableObject {
 
 /// The detail panel shown when the status item is clicked.
 ///
-/// The strip and any warning are always in view; the tabs hold whichever of the
-/// two longer lists is wanted. The panel takes the height of what it is showing
-/// and scrolls only past `maxHeight`.
-struct PopoverView: View {
+/// Laid out like Control Center: separate glass modules floating on nothing,
+/// with no sheet behind them. The readings and any warning are always in view,
+/// and one large module holds whichever of the two longer lists is wanted. The
+/// panel takes the height of what it is showing and scrolls past `maxHeight`.
+struct PanelView: View {
     @ObservedObject var engine: MetricsEngine
     @ObservedObject var config: ConfigStore
     @ObservedObject var panel: PanelState
@@ -39,106 +40,134 @@ struct PopoverView: View {
     private var activeWarnings: [AttentionEvent] { snapshot.attention.filter { $0.endedAt == nil } }
 
     var body: some View {
-        Group {
+        GlassGroup {
             if panel.showsSettings {
                 SettingsView(store: config, editConfig: editConfig) { panel.showsSettings = false }
+                    .glassModule(in: RoundedRectangle(cornerRadius: Self.cornerRadius), blur: 1)
             } else {
                 dashboard
             }
         }
-        .frame(width: 360)
+        .frame(width: 348)
+        .padding(6)
         .font(.system(size: 11).monospacedDigit())
     }
 
+    private static let cornerRadius: CGFloat = 28
+
     private var dashboard: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            chrome.onGeometryChange(for: CGFloat.self, of: \.size.height) { chromeHeight = $0 }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    tabContent
-                        .onGeometryChange(for: CGFloat.self, of: \.size.height) { contentHeight = $0 }
-                }
-                .frame(height: min(contentHeight, max(160, maxHeight - chromeHeight)))
-                .task(id: scrollTarget) {
-                    guard let scrollTarget else { return }
-                    // The History tab may be appearing in this same update, and
-                    // a section that is not laid out yet cannot be scrolled to.
-                    await Task.yield()
-                    proxy.scrollTo(scrollTarget, anchor: .top)
-                    self.scrollTarget = nil
+        VStack(alignment: .leading, spacing: 8) {
+            modules.onGeometryChange(for: CGFloat.self, of: \.size.height) { chromeHeight = $0 + 8 + 50 }
+            VStack(spacing: 0) {
+                tabBar
+                divider
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        tabContent
+                            .onGeometryChange(for: CGFloat.self, of: \.size.height) { contentHeight = $0 }
+                    }
+                    .frame(height: min(contentHeight, max(160, maxHeight - chromeHeight)))
+                    .task(id: scrollTarget) {
+                        guard let scrollTarget else { return }
+                        // The History tab may be appearing in this same update, and
+                        // a section that is not laid out yet cannot be scrolled to.
+                        await Task.yield()
+                        proxy.scrollTo(scrollTarget, anchor: .top)
+                        self.scrollTarget = nil
+                    }
                 }
             }
+            .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius))
+            .glassModule(in: RoundedRectangle(cornerRadius: Self.cornerRadius), blur: 1)
         }
     }
 
-    private var chrome: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header.padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
-            GlanceStrip(tiles: tiles, end: snapshot.sampledAt, duration: HistoryWindow.fiveMinutes.rawValue) { section in
+    private var modules: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            GlanceModules(tiles: tiles, bars: bars, end: snapshot.sampledAt, duration: HistoryWindow.fiveMinutes.rawValue) { section in
                 tab = .history
                 scrollTarget = section
             }
-            .padding(.horizontal, 14)
-            if !activeWarnings.isEmpty { warnings.padding(.horizontal, 14).padding(.top, 8) }
-            if let problem = config.problem { configProblem(problem).padding(.horizontal, 14).padding(.top, 8) }
+            if !activeWarnings.isEmpty { warnings }
+            if let problem = config.problem { configProblem(problem) }
+        }
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 10) {
             Picker("Panel view", selection: $tab) {
                 ForEach(PanelTab.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .controlSize(.small)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            divider
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: 8) {
-            Text("Vitals").font(.system(size: 13, weight: .semibold))
+            .fixedSize()
+            Spacer()
             if ProcessInfo.processInfo.isLowPowerModeEnabled {
-                Label("Low Power", systemImage: "leaf")
-                    .font(.system(size: 10))
+                Image(systemName: "leaf")
                     .foregroundStyle(.secondary)
                     .help("Low Power Mode doubles the sample interval")
+                    .accessibilityLabel("Low Power Mode")
             }
-            Spacer()
             Button(action: showMenu) {
-                Image(systemName: "gearshape").font(.system(size: 13))
+                Image(systemName: "gearshape").font(.system(size: 14))
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .help("Settings and more")
             .accessibilityLabel("Vitals menu")
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     private var tiles: [GlanceTile] {
         var tiles = [
-            GlanceTile(id: .cpu, title: "CPU", value: Format.percent(snapshot.cpu.total),
+            GlanceTile(id: .cpu, title: "CPU", value: Format.percent(snapshot.cpu.total), symbol: "cpu",
                        isAlert: snapshot.cpu.total >= engine.thresholds.cpu,
-                       sparkline: points(snapshot.cpuHistory, .fiveMinutes), tint: .accentColor),
-            GlanceTile(id: .memory, title: "Memory", value: Format.bytes(snapshot.memory.used),
-                       caption: "of \(Format.bytes(snapshot.memory.total))",
-                       isAlert: snapshot.memory.pressureLevel > 1,
-                       sparkline: points(snapshot.memoryHistory, .fiveMinutes), tint: .purple),
-            GlanceTile(id: .network, title: "Network", value: "↓ \(Format.rate(snapshot.network.download))",
-                       caption: "↑ \(Format.rate(snapshot.network.upload))",
+                       sparkline: points(snapshot.cpuHistory, .fiveMinutes)),
+            GlanceTile(id: .network, title: "Network", value: "↑ \(Format.rate(snapshot.network.upload))",
+                       symbol: "arrow.up.arrow.down",
+                       titleOverride: "↓ \(Format.rate(snapshot.network.download))",
                        spokenValue: "\(Format.rate(snapshot.network.download)) down, \(Format.rate(snapshot.network.upload)) up"),
-            GlanceTile(id: .disk, title: "Disk", value: Format.bytes(snapshot.disk.free), caption: "free",
-                       isAlert: snapshot.disk.total > 0 && snapshot.disk.freeFraction < engine.thresholds.diskFree),
         ]
         if let temperature = snapshot.thermal.cpu {
-            tiles.append(GlanceTile(id: .temperature, title: "Temp", value: Format.celsius(temperature),
-                                    caption: snapshot.thermal.state == .nominal ? "hottest die" : thermalStateLabel,
+            tiles.append(GlanceTile(id: .temperature, title: "Temperature", value: Format.celsius(temperature),
+                                    symbol: "thermometer.medium",
+                                    caption: snapshot.thermal.state == .nominal ? nil : thermalStateLabel,
                                     isAlert: temperature >= engine.thresholds.temperature || snapshot.thermal.state.rawValue >= ProcessInfo.ThermalState.serious.rawValue,
                                     spokenValue: "\(Int(temperature.rounded())) degrees"))
         }
         if let battery = snapshot.battery {
             tiles.append(GlanceTile(id: .battery, title: "Battery", value: "\(battery.percent)%",
+                                    symbol: batterySymbol(battery),
                                     caption: batteryCaption(battery), isAlert: battery.isLow))
         }
         return tiles
+    }
+
+    private var bars: [GlanceBar] {
+        [
+            GlanceBar(id: .memory, title: "Memory",
+                      value: "\(Format.bytes(snapshot.memory.used)) of \(Format.bytes(snapshot.memory.total))",
+                      fraction: snapshot.memory.usedFraction, symbol: "memorychip",
+                      isAlert: snapshot.memory.pressureLevel > 1),
+            GlanceBar(id: .disk, title: "Disk",
+                      value: "\(Format.bytes(snapshot.disk.free)) free of \(Format.bytes(snapshot.disk.total))",
+                      fraction: snapshot.disk.usedFraction, symbol: "internaldrive",
+                      isAlert: snapshot.disk.total > 0 && snapshot.disk.freeFraction < engine.thresholds.diskFree),
+        ]
+    }
+
+    private func batterySymbol(_ battery: BatterySample) -> String {
+        if battery.state == .charging { return "battery.100percent.bolt" }
+        return switch battery.percent {
+        case ..<13: "battery.0percent"
+        case ..<38: "battery.25percent"
+        case ..<63: "battery.50percent"
+        case ..<88: "battery.75percent"
+        default: "battery.100percent"
+        }
     }
 
     private var warnings: some View {
@@ -156,9 +185,10 @@ struct PopoverView: View {
                 .accessibilityElement(children: .combine)
             }
         }
-        .padding(8)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .glassModule(in: RoundedRectangle(cornerRadius: 24), tint: .orange.opacity(0.35))
     }
 
     private func configProblem(_ problem: String) -> some View {
@@ -171,9 +201,10 @@ struct PopoverView: View {
             Spacer(minLength: 0)
             Button("Open", action: editConfig).controlSize(.small)
         }
-        .padding(8)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .glassModule(in: RoundedRectangle(cornerRadius: 24), tint: .orange.opacity(0.35))
     }
 
     @ViewBuilder

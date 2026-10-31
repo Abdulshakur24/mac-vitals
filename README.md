@@ -4,11 +4,11 @@
 
 A local-only macOS menu-bar monitor for CPU, memory, network, disk, temperature, and battery. No dependencies or update checker.
 
-**Requires:** Apple Silicon, macOS 14+, and the Xcode Swift toolchain.
+**Requires:** Apple Silicon, macOS 14+, and the Xcode Swift toolchain. Liquid Glass needs macOS 26; earlier versions use a material background.
 
 ## Features
 
-- A glance strip of every metric, with **Apps** and **History** tabs below it. Click a tile to jump to its history.
+- A Control Center-style panel of Liquid Glass modules for every metric, with **Apps** and **History** tabs below them. Click a module to jump to its history.
 - Top apps by CPU or memory, with grouped helpers and expandable process details. Tick **All processes** to include system services and command-line tools.
 - Quit apps from the row’s actions menu, or Force Quit with confirmation.
 - Sustained warnings that name the app responsible, such as `Top: Xcode 180%`.
