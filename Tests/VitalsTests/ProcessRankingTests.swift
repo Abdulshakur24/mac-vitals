@@ -139,6 +139,27 @@ final class ProcessRankingTests: XCTestCase {
         XCTAssertEqual(sampler.sample().rows.first?.cpu, 0)
     }
 
+    /// A process that started after the last scan began spent all of its CPU
+    /// time inside this interval, so all of it counts. Read as 0%, the
+    /// compilers a build starts during a warning's dwell would hide its load.
+    func testProcessesStartedSinceTheLastScanCountFromTheirStart() throws {
+        var time = 100.0
+        var machTime: UInt64 = 1_000
+        var input: [ProcessSampler.Reading] = [.init(pid: 2, started: 10, cpuTime: 0, memory: 1)]
+        let sampler = ProcessSampler(read: { input }, clock: { time }, absoluteClock: { machTime },
+                                     ticksToNanoseconds: 1, metadata: { _ in .init(name: "p", app: nil) })
+        _ = sampler.sample()
+        time += 2
+        machTime = 3_000
+        input = [.init(pid: 2, started: 10, cpuTime: 1_000_000_000, memory: 1),    // seen last scan
+                 .init(pid: 3, started: 2_000, cpuTime: 1_000_000_000, memory: 1), // started since it began
+                 .init(pid: 4, started: 500, cpuTime: 1_000_000_000, memory: 1)]   // older, but never seen
+        let cpu = Dictionary(uniqueKeysWithValues: sampler.sample().rows.map { ($0.pid, $0.cpu) })
+        XCTAssertEqual(try XCTUnwrap(cpu[2]), 0.5, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(cpu[3]), 0.5, accuracy: 1e-9)
+        XCTAssertEqual(cpu[4], 0)
+    }
+
     @MainActor
     func testEngineOnlyScansVisibleDetailAndRebaselinesAfterWake() {
         var reads = 0

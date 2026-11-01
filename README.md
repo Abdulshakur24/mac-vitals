@@ -18,7 +18,7 @@ A local-only macOS menu-bar monitor for CPU, memory, network, disk, temperature,
 - Shrinks to fit crowded menu bars, pauses during sleep, and reduces sampling in Low Power Mode.
 - The gear icon, or right-clicking the menu bar item, opens **Settings**, Activity Monitor, the config file, and **Quit**.
 
-100% app CPU equals one busy core. Resident memory totals may count shared pages more than once. Process scans run while the panel is open, and briefly when a CPU or memory warning fires. Root-owned processes can't be read, so a warning caused by one names nothing.
+100% app CPU equals one busy core. Resident memory totals may count shared pages more than once. Process scans run while the panel is open, and briefly when a CPU or memory warning fires. Root-owned processes can't be read, so a CPU warning names the top process only if it is at least a quarter of the load, or the processes Vitals can read are at least half of it; otherwise it names nothing rather than a bystander. Network counts physical interfaces only, so traffic through a VPN or a virtual machine's bridge isn't counted twice.
 
 Menu bar digits update at most every 3 seconds, or at once when a warning colour changes, because redrawing the status item is most of the app's idle cost. The panel and charts keep the full sample rate.
 

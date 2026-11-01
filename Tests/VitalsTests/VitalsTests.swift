@@ -69,6 +69,29 @@ final class VitalsTests: XCTestCase {
         XCTAssertTrue(NetworkSampler.interfaceCounters(in: [0, 0, 0, 0]).isEmpty)
     }
 
+    /// A VPN's bytes cross its tunnel and then, encrypted, Wi-Fi or Ethernet;
+    /// a VM's cross a bridge and then a physical port. Counting both shows the
+    /// same transfer twice, so only physical interfaces are kept.
+    func testTunnelsAndBridgesAreNotCountedTwice() {
+        func record(_ name: String, index: UInt16) -> [UInt8] {
+            var message = if_msghdr2()
+            message.ifm_msglen = UInt16(MemoryLayout<if_msghdr2>.stride + 20)
+            message.ifm_type = UInt8(RTM_IFINFO2)
+            message.ifm_flags = IFF_UP | IFF_RUNNING
+            message.ifm_index = index
+            message.ifm_data.ifi_ibytes = 1000
+            var bytes: [UInt8] = []
+            withUnsafeBytes(of: message) { bytes.append(contentsOf: $0) }
+            let nameBytes = Array(name.utf8)
+            bytes += [20, UInt8(AF_LINK), UInt8(index), 0, 6, UInt8(nameBytes.count), 0, 0] + nameBytes
+                + [UInt8](repeating: 0, count: 12 - nameBytes.count)
+            return bytes
+        }
+        let names = ["en0", "utun4", "ipsec0", "ppp0", "bridge100", "vmenet0", "awdl0", "en5"]
+        let buffer = names.enumerated().flatMap { offset, name in record(name, index: UInt16(offset + 1)) }
+        XCTAssertEqual(Set(NetworkSampler.interfaceCounters(in: buffer).keys), ["en0", "awdl0", "en5"])
+    }
+
     func testShortVariableLengthInterfaceRecord() {
         let headerSize = MemoryLayout<if_msghdr2>.stride
         var bytes = [UInt8](repeating: 0, count: headerSize + 12)
@@ -463,23 +486,63 @@ final class CulpritTests: XCTestCase {
                        app: ProcessApp(bundleURL: URL(fileURLWithPath: "/Applications/\(name).app"), name: name))
     }
 
+    /// The system reading a warning was raised on: `cores` cores, all at `total`.
+    private func systemLoad(_ total: Double, cores: Int = 4) -> CPUSample {
+        CPUSample(total: total, perCore: Array(repeating: total, count: cores))
+    }
+
     func testNamesTheBiggestUserOfEachResource() {
         let sample = ProcessSample(rows: [app("Xcode", pid: 2, cpu: 1.8, memory: 1 << 30),
                                           app("Safari", pid: 3, cpu: 0.4, memory: 4 << 30)], state: .ready)
-        XCTAssertEqual(sample.culprit(for: .cpu), "Xcode 180%")
-        XCTAssertEqual(sample.culprit(for: .memory), "Safari 4.0 GB")
+        XCTAssertEqual(sample.culprit(for: .cpu, cpu: systemLoad(0.8)), "Xcode 180%")
+        XCTAssertEqual(sample.culprit(for: .memory, cpu: systemLoad(0.8)), "Safari 4.0 GB")
     }
 
     func testCommandLineToolsCount() {
         let sample = ProcessSample(rows: [ProcessInfoRow(pid: 9, started: 1, name: "yes", cpu: 2, memory: 1)], state: .ready)
-        XCTAssertEqual(sample.culprit(for: .cpu), "yes 200%")
+        XCTAssertEqual(sample.culprit(for: .cpu, cpu: systemLoad(0.75)), "yes 200%")
     }
 
     func testDoesNotBlameABystander() {
         let quiet = ProcessSample(rows: [app("Notes", pid: 2, cpu: 0.03, memory: 1)], state: .ready)
-        XCTAssertNil(quiet.culprit(for: .cpu))
-        XCTAssertNil(ProcessSample().culprit(for: .cpu))
-        XCTAssertNil(ProcessSample(rows: [app("Notes", pid: 2, cpu: 1, memory: 1)], state: .ready).culprit(for: .disk))
+        XCTAssertNil(quiet.culprit(for: .cpu, cpu: systemLoad(0.8)))
+        XCTAssertNil(ProcessSample().culprit(for: .cpu, cpu: systemLoad(0.8)))
+        XCTAssertNil(ProcessSample(rows: [app("Notes", pid: 2, cpu: 1, memory: 1)], state: .ready)
+            .culprit(for: .disk, cpu: systemLoad(0.8)))
+    }
+
+    /// Ten cores at 80% is eight cores of work. Readable processes coming to a
+    /// fraction of that puts the rest in processes this app cannot read, and
+    /// the busiest readable one is then a bystander, even though it clears a
+    /// quarter of a core.
+    func testLoadTheListCannotSeeNamesNobody() {
+        let busy = systemLoad(0.8, cores: 10)
+        let bystanders = ProcessSample(rows: [app("Safari", pid: 2, cpu: 0.3, memory: 1),
+                                              app("Slack", pid: 3, cpu: 0.2, memory: 1)], state: .ready)
+        XCTAssertNil(bystanders.culprit(for: .cpu, cpu: busy))
+        // A quarter of the load is a real part of it, whatever the rest is.
+        let large = ProcessSample(rows: [app("Docker", pid: 2, cpu: 2.5, memory: 1)], state: .ready)
+        XCTAssertEqual(large.culprit(for: .cpu, cpu: busy), "Docker 250%")
+        // Work spread across processes that can be read still has a fair name.
+        let build = ProcessSample(rows: (0..<8).map { index in
+            ProcessInfoRow(pid: Int32(index + 2), started: 1, name: "clang", cpu: 0.6 - Double(index) / 100, memory: 1)
+        }, state: .ready)
+        XCTAssertEqual(build.culprit(for: .cpu, cpu: busy), "clang 60%")
+    }
+
+    /// The first scan after launch or wake has nothing to measure CPU against,
+    /// but memory needs no baseline, so a memory warning raised on that scan
+    /// still names the app.
+    func testMemoryCulpritNeedsNoBaseline() {
+        let sampler = ProcessSampler(read: { [.init(pid: 2, started: 1, cpuTime: 5, memory: 6 << 30),
+                                               .init(pid: 3, started: 1, cpuTime: 5, memory: 1 << 30)] },
+                                     clock: { 100 }, ticksToNanoseconds: 1,
+                                     metadata: { pid in .init(name: pid == 2 ? "Safari" : "Notes", app: nil) })
+        let first = sampler.sample()
+        XCTAssertEqual(first.state, .sampling)
+        XCTAssertEqual(first.culprit(for: .memory, cpu: systemLoad(0.8)), "Safari 6.0 GB")
+        // CPU still waits for a second scan.
+        XCTAssertNil(first.culprit(for: .cpu, cpu: systemLoad(0.8)))
     }
 
     func testTrackerReportsDwellThenRaiseAndKeepsTheCulprit() {

@@ -27,6 +27,12 @@ struct NetworkSample: Equatable {
 /// Deltas are tracked per interface rather than on a summed total, so a VPN
 /// coming up or Wi-Fi reconnecting doesn't register as a huge phantom
 /// transfer — a newly appeared interface simply has no baseline to diff yet.
+///
+/// **Only physical interfaces count.** A VPN's tunnel carries the same bytes
+/// that then leave, encrypted, through Wi-Fi or Ethernet, so summing both
+/// shows a VPN download at about twice its speed. Bridges in front of virtual
+/// machines and Internet Sharing are the same story: what crosses them either
+/// stays on this Mac or goes out through a physical interface anyway.
 final class NetworkSampler {
     struct Counters {
         var received: UInt64
@@ -170,7 +176,7 @@ final class NetworkSampler {
                 guard flags & IFF_UP != 0, flags & IFF_RUNNING != 0 else { continue }
 
                 let name = Self.interfaceName(base: base, offset: offset, limit: offset + messageLength)
-                guard !name.isEmpty else { continue }
+                guard !name.isEmpty, Self.countsTowardThroughput(name) else { continue }
 
                 let data = message.ifm_data
                 result[name] = Counters(
@@ -184,6 +190,20 @@ final class NetworkSampler {
         }
 
         return result
+    }
+
+    /// Interfaces whose traffic is already counted on a physical one: VPN and
+    /// IPv6-over-IPv4 tunnels, and the bridges macOS puts in front of virtual
+    /// machines, Internet Sharing and Thunderbolt Bridge (whose member ports
+    /// are counted themselves).
+    ///
+    /// By name rather than by `ifi_type`: a type check that turned out wrong
+    /// on some Mac would drop Wi-Fi itself and read zero forever, while a name
+    /// missing from this list only leaves that one interface double-counted.
+    private static let layeredPrefixes = ["utun", "ipsec", "ppp", "gif", "stf", "bridge", "vmenet"]
+
+    static func countsTowardThroughput(_ name: String) -> Bool {
+        !layeredPrefixes.contains { name.hasPrefix($0) }
     }
 
     /// The interface name lives in the `sockaddr_dl` that immediately follows

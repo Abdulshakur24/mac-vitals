@@ -78,6 +78,10 @@ struct CPUSample: Equatable {
     var perCore: [Double] = []
 
     var idle: Double { max(0, 1 - total) }
+
+    /// The load in cores, the unit a process's CPU is measured in: 2.0 is two
+    /// cores' worth of work, however many the machine has.
+    var busyCores: Double { total * Double(perCore.count) }
 }
 
 /// Per-core CPU load from the Mach host's tick counters.

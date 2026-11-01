@@ -91,6 +91,8 @@ struct ProcessGroup: Equatable, Identifiable {
 }
 
 struct ProcessSample: Equatable {
+    /// `sampling` is a first scan: CPU takes two, so its rows read 0% CPU,
+    /// but their resident memory is already real. `ready` has both.
     enum State: Equatable { case sampling, ready, unavailable }
 
     let state: State
