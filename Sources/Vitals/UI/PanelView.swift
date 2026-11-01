@@ -357,7 +357,7 @@ struct PanelView: View {
                 HistorySeries(name: "↓ Down", points: down, color: .blue, format: Format.rate),
                 HistorySeries(name: "↑ Up", points: up, color: .green, format: Format.rate),
             ], ceiling: ceiling([down, up]), summary: "↓ \(down.summary(Format.rate))")
-                .help("All active interfaces. The scale follows the busiest moment in view.")
+                .help("VPN tunnels and virtual machine interfaces are left out, so their traffic is not counted twice. The scale follows the busiest moment in view.")
 
             HStack(spacing: 14) {
                 legend("↓ Down", Format.rate(snapshot.network.download), tint: .blue)

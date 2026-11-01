@@ -30,21 +30,39 @@ struct AttentionChange: Equatable {
 extension ProcessSample {
     /// The biggest user of the resource behind a warning, as display text.
     ///
-    /// nil when nothing here stands out. Root-owned processes cannot be read
-    /// without root, so a load that belongs to one leaves only bystanders in
-    /// this list, and naming the largest of them would be an accusation
-    /// without evidence.
-    func culprit(for kind: AttentionKind) -> String? {
+    /// nil when nothing here stands out. `cpu` is the system reading the
+    /// warning was raised on, and it is what tells a culprit from a bystander.
+    func culprit(for kind: AttentionKind, cpu: CPUSample) -> String? {
         switch kind {
         case .cpu:
-            guard state == .ready, let top = ranked(by: .cpu, filter: .all).first, top.cpu >= 0.25 else { return nil }
+            let readable = rows.reduce(0) { $0 + $1.cpu }
+            guard state == .ready, let top = ranked(by: .cpu, filter: .all).first,
+                  Self.explains(top: top.cpu, readable: readable, load: cpu.busyCores) else { return nil }
             return "\(top.name) \(Format.percent(top.cpu))"
         case .memory:
-            guard state == .ready, let top = ranked(by: .memory, filter: .all).first else { return nil }
+            // Resident memory needs no earlier scan to measure against, so a
+            // sample still waiting on its CPU figures can already name this.
+            guard let top = ranked(by: .memory, filter: .all).first else { return nil }
             return "\(top.name) \(Format.bytes(top.memory))"
         case .disk, .thermal:
             return nil
         }
+    }
+
+    /// Whether the busiest readable process, at `top` cores, can be named for
+    /// a load of `load` cores when every readable process came to `readable`.
+    ///
+    /// Root-owned processes cannot be read without root, so a load that
+    /// belongs to one leaves only bystanders in this list, and a floor of a
+    /// quarter of a core is no test on a machine with ten: seven of them busy
+    /// in `mds_stores` would still name a browser idling at 30%. So the top
+    /// process has to be a real part of the load itself, or the processes
+    /// that can be read have to cover most of it, in which case the largest
+    /// of them is a fair name even if the work is spread across many. Neither
+    /// means the load is somewhere this list cannot see, and nothing is named.
+    static func explains(top: Double, readable: Double, load: Double) -> Bool {
+        guard top >= 0.25, load > 0 else { return false }
+        return top >= load / 4 || readable >= load / 2
     }
 }
 
@@ -83,10 +101,14 @@ struct AttentionTracker {
         }
     }
 
-    /// Names whoever was responsible for an active warning.
+    /// Names whoever was responsible for an active warning, or nobody.
+    ///
+    /// Called only as a warning is raised, so nil replaces the old name rather
+    /// than being skipped. A warning reopened after sleep is a new episode
+    /// under the same title, and if this time the load cannot be traced, the
+    /// app blamed before the sleep must not stay on it.
     mutating func setCulprit(_ culprit: String?, for kind: AttentionKind) {
-        guard let culprit,
-              let index = events.lastIndex(where: { $0.kind == kind && $0.endedAt == nil }) else { return }
+        guard let index = events.lastIndex(where: { $0.kind == kind && $0.endedAt == nil }) else { return }
         events[index].culprit = culprit
     }
 

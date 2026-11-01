@@ -27,6 +27,14 @@ struct NetworkSample: Equatable {
 /// Deltas are tracked per interface rather than on a summed total, so a VPN
 /// coming up or Wi-Fi reconnecting doesn't register as a huge phantom
 /// transfer — a newly appeared interface simply has no baseline to diff yet.
+///
+/// **Tunnels and virtual interfaces are left out.** A VPN's tunnel carries the
+/// same bytes that then leave, encrypted, through Wi-Fi or Ethernet, so
+/// summing both shows a VPN download at about twice its speed. A virtual
+/// machine's interfaces are the same: what crosses them either stays on this
+/// Mac or goes out through a physical interface anyway. Internet Sharing is
+/// the case this cannot fix: forwarded traffic crosses the uplink and the
+/// port it is shared on, both physical, so it is still counted twice.
 final class NetworkSampler {
     struct Counters {
         var received: UInt64
@@ -170,7 +178,7 @@ final class NetworkSampler {
                 guard flags & IFF_UP != 0, flags & IFF_RUNNING != 0 else { continue }
 
                 let name = Self.interfaceName(base: base, offset: offset, limit: offset + messageLength)
-                guard !name.isEmpty else { continue }
+                guard !name.isEmpty, Self.countsTowardThroughput(name) else { continue }
 
                 let data = message.ifm_data
                 result[name] = Counters(
@@ -184,6 +192,23 @@ final class NetworkSampler {
         }
 
         return result
+    }
+
+    /// Interfaces whose traffic is also counted on another one: VPN links
+    /// (`utun`, `ipsec`, `ppp`, the legacy `tun` and `tap` drivers, and
+    /// ZeroTier's `feth`), IPv6-over-IPv4 tunnels (`gif`, `stf`), the host
+    /// side of virtual machines (`vmenet`, VMware's `vmnet`, Parallels'
+    /// `vnic`), and bridges, whose member ports are counted themselves.
+    ///
+    /// By name rather than by `ifi_type`, so a mistake costs one interface: a
+    /// name missing here leaves that interface counted twice, and one wrongly
+    /// here hides it, as `ppp` would hide a real dial-up modem. A type check
+    /// that turned out wrong on some Mac could drop Wi-Fi itself and read zero.
+    private static let layeredPrefixes = ["utun", "ipsec", "ppp", "tun", "tap", "feth", "gif", "stf",
+                                          "vmenet", "vmnet", "vnic", "bridge"]
+
+    static func countsTowardThroughput(_ name: String) -> Bool {
+        !layeredPrefixes.contains { name.hasPrefix($0) }
     }
 
     /// The interface name lives in the `sockaddr_dl` that immediately follows

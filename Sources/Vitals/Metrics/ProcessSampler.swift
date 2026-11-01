@@ -39,9 +39,12 @@ final class ProcessSampler {
 
     private var seen: [Int32: Seen] = [:]
     private var previousTime: TimeInterval?
+    /// When the last scan began, on the mach clock `Reading.started` uses.
+    private var previousScanStart: UInt64?
     private var apps: [URL: ProcessApp] = [:]
     private let read: () -> [Reading]?
     private let clock: () -> TimeInterval
+    private let absoluteClock: () -> UInt64
     private let resolveMetadata: ((Int32) -> Metadata)?
 
     /// Converts mach absolute time units to nanoseconds.
@@ -61,10 +64,12 @@ final class ProcessSampler {
 
     init(read: @escaping () -> [Reading]? = ProcessSampler.readProcesses,
          clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         absoluteClock: @escaping () -> UInt64 = { mach_absolute_time() },
          ticksToNanoseconds: Double = ProcessSampler.systemTicksToNanoseconds,
          metadata: ((Int32) -> Metadata)? = nil) {
         self.read = read
         self.clock = clock
+        self.absoluteClock = absoluteClock
         self.ticksToNanoseconds = ticksToNanoseconds
         self.resolveMetadata = metadata
     }
@@ -73,9 +78,13 @@ final class ProcessSampler {
     /// spent hidden, asleep, or without readable counters.
     func resetBaseline() {
         previousTime = nil
+        previousScanStart = nil
     }
 
     func sample() -> ProcessSample {
+        // Taken before the read, so a process that starts while the read is
+        // running counts as having started after this scan.
+        let scanStart = absoluteClock()
         guard let readings = read() else {
             resetBaseline()
             return ProcessSample(state: .unavailable)
@@ -84,7 +93,11 @@ final class ProcessSampler {
         let now = clock()
         let elapsed = previousTime.map { now - $0 } ?? 0
         let hasBaseline = previousTime != nil && elapsed > 0
-        defer { previousTime = now }
+        let lastScanStart = previousScanStart
+        defer {
+            previousTime = now
+            previousScanStart = scanStart
+        }
 
         var rows: [ProcessInfoRow] = []
         // Rebuilt every pass, which also drops processes that have exited.
@@ -99,10 +112,23 @@ final class ProcessSampler {
             let metadata = previous?.metadata ?? resolveMetadata?(pid) ?? metadata(of: pid)
             current[pid] = Seen(started: started, cpuTime: cpuTime, metadata: metadata)
 
+            // CPU time used since the last scan. A process seen then is
+            // measured from that reading. One that started after the last scan
+            // began has spent all of its CPU time since, so all of it counts;
+            // otherwise everything younger than the interval reads 0%, which
+            // across a warning's 15 s dwell is most of a build's compilers.
+            // Anything else is new to the list but older than the interval,
+            // and has nothing to be measured from. A process that starts and
+            // exits between two scans is never seen at all.
+            var used: UInt64?
+            if let previous {
+                if cpuTime >= previous.cpuTime { used = cpuTime - previous.cpuTime }
+            } else if let lastScanStart, started >= lastScanStart {
+                used = cpuTime
+            }
             var cpuShare = 0.0
-            if hasBaseline, let previous, cpuTime >= previous.cpuTime {
-                let nanoseconds = Double(cpuTime - previous.cpuTime) * ticksToNanoseconds
-                cpuShare = nanoseconds / (elapsed * 1_000_000_000)
+            if hasBaseline, let used {
+                cpuShare = Double(used) * ticksToNanoseconds / (elapsed * 1_000_000_000)
             }
 
             rows.append(ProcessInfoRow(
@@ -119,9 +145,10 @@ final class ProcessSampler {
         let liveApps = Set(rows.compactMap { $0.app?.bundleURL })
         apps = apps.filter { liveApps.contains($0.key) }
 
-        guard hasBaseline else { return ProcessSample() }
-
-        return ProcessSample(rows: rows, state: .ready)
+        // Without a baseline there is no CPU to report yet, but resident memory
+        // needs none: a memory warning raised on the first scan after launch
+        // or wake names its culprit from these rows.
+        return ProcessSample(rows: rows, state: hasBaseline ? .ready : .sampling)
     }
 
     private static func readProcesses() -> [Reading]? {

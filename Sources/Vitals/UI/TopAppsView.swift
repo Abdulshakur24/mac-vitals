@@ -18,8 +18,12 @@ struct TopAppsView: View {
     }
 
     private var liveIDs: Set<ProcessGroup.ID> { Set(sample.groups.map(\.id)) }
+    /// Empty until the list is on screen. A first scan has rows, but none are
+    /// shown yet, and with every one at 0% CPU its top five by CPU are not the
+    /// ones about to appear.
     private var visibleAppURLs: Set<URL> {
-        Set(selection.displayed(in: sample).compactMap { $0.app?.bundleURL })
+        guard sample.state == .ready else { return [] }
+        return Set(selection.displayed(in: sample).compactMap { $0.app?.bundleURL })
     }
 
     var body: some View {

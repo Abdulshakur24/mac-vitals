@@ -316,7 +316,7 @@ final class MetricsEngine: ObservableObject {
             next.diskWriteHistory.markGap()
         }
         let change = attentionTracker.update(snapshot: evidence, thresholds: thresholds, at: timestamp)
-        nameCulprits(for: change, processes: next.processes)
+        nameCulprits(for: change, processes: next.processes, cpu: evidence.cpu)
         next.attention = attentionTracker.events
 
         // Walking the process table is the most expensive thing here, so it
@@ -338,9 +338,11 @@ final class MetricsEngine: ObservableObject {
     /// the one thing that cannot wait for them. A CPU reading needs two scans:
     /// a baseline as the condition begins, and a second when it has lasted, so
     /// the figure is the average across the whole dwell rather than an instant.
-    /// While the panel is open the process list is already running on its own
-    /// baseline, so that is left alone and its latest reading used instead.
-    private func nameCulprits(for change: AttentionChange, processes: ProcessSample) {
+    /// Memory needs only the one scan, so it can be named straight after launch
+    /// or wake, when no baseline exists yet. While the panel is open the
+    /// process list is already running on its own baseline, so that is left
+    /// alone and its latest reading used instead.
+    private func nameCulprits(for change: AttentionChange, processes: ProcessSample, cpu: CPUSample) {
         let panelOpen = isDetailVisible()
         if change.dwellStarted.contains(.cpu), !change.raised.contains(.cpu), !panelOpen {
             processSampler.resetBaseline()
@@ -350,7 +352,7 @@ final class MetricsEngine: ObservableObject {
         guard !kinds.isEmpty else { return }
         let sample = panelOpen ? processes : processSampler.sample()
         for kind in kinds {
-            attentionTracker.setCulprit(sample.culprit(for: kind), for: kind)
+            attentionTracker.setCulprit(sample.culprit(for: kind, cpu: cpu), for: kind)
         }
     }
 }
