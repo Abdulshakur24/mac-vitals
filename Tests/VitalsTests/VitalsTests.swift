@@ -87,7 +87,8 @@ final class VitalsTests: XCTestCase {
                 + [UInt8](repeating: 0, count: 12 - nameBytes.count)
             return bytes
         }
-        let names = ["en0", "utun4", "ipsec0", "ppp0", "bridge100", "vmenet0", "awdl0", "en5"]
+        let names = ["en0", "utun4", "ipsec0", "ppp0", "tun0", "tap0", "feth1813", "bridge100",
+                     "vmenet0", "vmnet8", "vnic0", "awdl0", "en5"]
         let buffer = names.enumerated().flatMap { offset, name in record(name, index: UInt16(offset + 1)) }
         XCTAssertEqual(Set(NetworkSampler.interfaceCounters(in: buffer).keys), ["en0", "awdl0", "en5"])
     }
@@ -557,6 +558,25 @@ final class CulpritTests: XCTestCase {
         tracker.setCulprit("Xcode 180%", for: .cpu)
         XCTAssertEqual(tracker.update(snapshot: snapshot, thresholds: .init(), at: 116), AttentionChange())
         XCTAssertEqual(tracker.events.first?.culprit, "Xcode 180%")
+    }
+
+    /// A warning reopened after sleep is a new episode under the same title.
+    /// If this time the load is somewhere the list cannot see, the app blamed
+    /// before the sleep must not stay on it.
+    func testReopenedWarningDoesNotKeepAnOldCulprit() {
+        var tracker = AttentionTracker()
+        var snapshot = Snapshot()
+        snapshot.cpu = systemLoad(0.9, cores: 10)
+        tracker.update(snapshot: snapshot, thresholds: .init(), at: 100)
+        tracker.update(snapshot: snapshot, thresholds: .init(), at: 115)
+        tracker.setCulprit("Xcode 180%", for: .cpu)
+        tracker.interrupt(at: 120)
+        tracker.update(snapshot: snapshot, thresholds: .init(), at: 200)
+        XCTAssertEqual(tracker.update(snapshot: snapshot, thresholds: .init(), at: 215).raised, [.cpu])
+        XCTAssertEqual(tracker.events.count, 1)
+        let bystander = ProcessSample(rows: [app("Safari", pid: 2, cpu: 0.3, memory: 1)], state: .ready)
+        tracker.setCulprit(bystander.culprit(for: .cpu, cpu: snapshot.cpu), for: .cpu)
+        XCTAssertNil(tracker.events.first?.culprit)
     }
 
     func testEngineDoesNotScanWhileNothingIsWrong() {

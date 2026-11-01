@@ -101,10 +101,14 @@ struct AttentionTracker {
         }
     }
 
-    /// Names whoever was responsible for an active warning.
+    /// Names whoever was responsible for an active warning, or nobody.
+    ///
+    /// Called only as a warning is raised, so nil replaces the old name rather
+    /// than being skipped. A warning reopened after sleep is a new episode
+    /// under the same title, and if this time the load cannot be traced, the
+    /// app blamed before the sleep must not stay on it.
     mutating func setCulprit(_ culprit: String?, for kind: AttentionKind) {
-        guard let culprit,
-              let index = events.lastIndex(where: { $0.kind == kind && $0.endedAt == nil }) else { return }
+        guard let index = events.lastIndex(where: { $0.kind == kind && $0.endedAt == nil }) else { return }
         events[index].culprit = culprit
     }
 
